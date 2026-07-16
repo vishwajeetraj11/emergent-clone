@@ -1,10 +1,24 @@
 "use client";
 
-import { useState } from "react";
-import { GitFork, Mic, MessageSquareDashed, Paperclip, Square } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowUp,
+  GitFork,
+  Mic,
+  MessageSquareDashed,
+  Paperclip,
+  Square,
+} from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Timeline } from "@/components/shell/Timeline";
+import { cn } from "@/lib/utils";
+import type { AnswerItem, JobStatus, TimelineEvent } from "@/lib/types";
 
 // lucide-react dropped brand marks, so the GitHub logo is inlined here.
 function GithubIcon(props: React.SVGProps<SVGSVGElement>) {
@@ -35,43 +49,135 @@ function IconAction({
   );
 }
 
-export function ChatPanel() {
+const STATUS_STRIP_CONFIG: Record<
+  JobStatus,
+  { label: string; dot: string; pulse: boolean }
+> = {
+  running: { label: "Agent is running…", dot: "bg-emerald-500", pulse: true },
+  waiting_on_user: {
+    label: "Agent is waiting…",
+    dot: "bg-amber-400",
+    pulse: true,
+  },
+  done: { label: "Agent finished", dot: "bg-emerald-500", pulse: false },
+  stopped: { label: "Agent stopped", dot: "bg-muted-foreground", pulse: false },
+  failed: { label: "Agent failed", dot: "bg-red-500", pulse: false },
+};
+
+function StatusStrip({ jobStatus }: { jobStatus: JobStatus | null }) {
+  if (!jobStatus) return null;
+  const { label, dot, pulse } = STATUS_STRIP_CONFIG[jobStatus];
+  return (
+    <div className="mb-2 flex items-center gap-2 rounded-md bg-secondary/60 px-2.5 py-1.5 text-xs text-muted-foreground">
+      <span className="relative flex size-1.5">
+        {pulse && (
+          <span
+            className={cn(
+              "absolute inline-flex size-full animate-ping rounded-full opacity-75",
+              dot
+            )}
+          />
+        )}
+        <span className={cn("relative inline-flex size-1.5 rounded-full", dot)} />
+      </span>
+      {label}
+    </div>
+  );
+}
+
+export function ChatPanel({
+  events,
+  jobStatus,
+  isStarting,
+  error,
+  hasProject,
+  onSubmitPrompt,
+  onAnswerQuestion,
+  onStop,
+}: {
+  events: TimelineEvent[];
+  jobStatus: JobStatus | null;
+  isStarting: boolean;
+  error: string | null;
+  hasProject: boolean;
+  onSubmitPrompt: (prompt: string) => void;
+  onAnswerQuestion: (toolUseId: string, answers: AnswerItem[]) => void;
+  onStop: () => void;
+}) {
   const [message, setMessage] = useState("");
+  const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    scrollAnchorRef.current?.scrollIntoView({ block: "end" });
+  }, [events.length]);
+
+  function handleSubmit() {
+    const trimmed = message.trim();
+    if (!trimmed || hasProject || isStarting) return;
+    onSubmitPrompt(trimmed);
+    setMessage("");
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  }
+
+  const isActive = jobStatus === "running" || jobStatus === "waiting_on_user";
+  const answersDisabled = jobStatus !== "waiting_on_user";
 
   return (
     <aside className="flex h-full w-[440px] shrink-0 flex-col border-r border-border bg-background">
       {/* Timeline */}
       <ScrollArea className="flex-1">
-        <div className="flex h-full min-h-[420px] flex-col items-center justify-center gap-3 px-8 py-16 text-center">
-          <div className="flex size-10 items-center justify-center rounded-full bg-secondary">
-            <MessageSquareDashed className="size-5 text-muted-foreground" />
+        {events.length === 0 ? (
+          <div className="flex h-full min-h-[420px] flex-col items-center justify-center gap-3 px-8 py-16 text-center">
+            <div className="flex size-10 items-center justify-center rounded-full bg-secondary">
+              <MessageSquareDashed className="size-5 text-muted-foreground" />
+            </div>
+            <p className="text-sm font-medium text-foreground">
+              No activity yet
+            </p>
+            <p className="max-w-56 text-xs leading-relaxed text-muted-foreground">
+              Send a message below to kick off the agent — its plan, file
+              edits, and progress will stream in here.
+            </p>
           </div>
-          <p className="text-sm font-medium text-foreground">
-            No activity yet
-          </p>
-          <p className="max-w-56 text-xs leading-relaxed text-muted-foreground">
-            Send a message below to kick off the agent — its plan, file
-            edits, and progress will stream in here.
-          </p>
-        </div>
+        ) : (
+          <div className="flex flex-col gap-3 px-4 py-4">
+            <Timeline
+              events={events}
+              onAnswerQuestion={onAnswerQuestion}
+              disabled={answersDisabled}
+            />
+            <div ref={scrollAnchorRef} />
+          </div>
+        )}
       </ScrollArea>
 
       {/* Pinned bottom composer */}
       <div className="shrink-0 border-t border-border bg-background p-3">
-        <div className="mb-2 flex items-center gap-2 rounded-md bg-secondary/60 px-2.5 py-1.5 text-xs text-muted-foreground">
-          <span className="relative flex size-1.5">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-75" />
-            <span className="relative inline-flex size-1.5 rounded-full bg-amber-400" />
-          </span>
-          Agent is waiting&hellip;
-        </div>
+        {error && (
+          <div className="mb-2 rounded-md bg-red-500/10 px-2.5 py-1.5 text-xs text-red-400">
+            {error}
+          </div>
+        )}
+        <StatusStrip jobStatus={jobStatus} />
 
         <div className="rounded-lg border border-input bg-input/20 p-2 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50">
           <Textarea
             value={message}
             onChange={(e) => setMessage(e.target.value)}
-            placeholder="Message Agent…"
-            className="min-h-16 resize-none border-none bg-transparent p-1 shadow-none focus-visible:ring-0"
+            onKeyDown={handleKeyDown}
+            placeholder={
+              hasProject
+                ? "Answer the agent's questions above…"
+                : "What will you build today?"
+            }
+            disabled={hasProject || isStarting}
+            className="min-h-16 resize-none border-none bg-transparent p-1 shadow-none focus-visible:ring-0 disabled:opacity-50"
           />
           <div className="flex items-center justify-between pt-1">
             <div className="flex items-center gap-0.5">
@@ -80,15 +186,31 @@ export function ChatPanel() {
               <IconAction icon={<GitFork className="size-4" />} label="Fork" />
               <IconAction icon={<Mic className="size-4" />} label="Voice input" />
             </div>
-            <Tooltip>
-              <TooltipTrigger
-                aria-label="Stop agent"
-                className="flex size-7 items-center justify-center rounded-md bg-foreground text-background transition-colors hover:bg-foreground/80"
-              >
-                <Square className="size-3 fill-current" />
-              </TooltipTrigger>
-              <TooltipContent>Stop agent</TooltipContent>
-            </Tooltip>
+            {hasProject ? (
+              <Tooltip>
+                <TooltipTrigger
+                  aria-label="Stop agent"
+                  onClick={onStop}
+                  disabled={!isActive}
+                  className="flex size-7 items-center justify-center rounded-md bg-foreground text-background transition-colors hover:bg-foreground/80 disabled:opacity-40"
+                >
+                  <Square className="size-3 fill-current" />
+                </TooltipTrigger>
+                <TooltipContent>Stop agent</TooltipContent>
+              </Tooltip>
+            ) : (
+              <Tooltip>
+                <TooltipTrigger
+                  aria-label="Send"
+                  onClick={handleSubmit}
+                  disabled={!message.trim() || isStarting}
+                  className="flex size-7 items-center justify-center rounded-md bg-foreground text-background transition-colors hover:bg-foreground/80 disabled:opacity-40"
+                >
+                  <ArrowUp className="size-3.5" />
+                </TooltipTrigger>
+                <TooltipContent>Send</TooltipContent>
+              </Tooltip>
+            )}
           </div>
         </div>
       </div>

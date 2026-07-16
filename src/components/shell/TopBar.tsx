@@ -7,6 +7,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DEV_USER } from "@/lib/dev-user";
 import { cn } from "@/lib/utils";
+import type { JobStatus, ProjectSummary } from "@/lib/types";
 
 type ProjectTab = {
   id: string;
@@ -14,9 +15,11 @@ type ProjectTab = {
   status: "running" | "idle" | "error";
 };
 
-const INITIAL_TABS: ProjectTab[] = [
-  { id: "quiz-builder-223", name: "quiz-builder-223", status: "running" },
-];
+function jobStatusToDotStatus(status: JobStatus | null | undefined): ProjectTab["status"] {
+  if (status === "running" || status === "waiting_on_user") return "running";
+  if (status === "failed") return "error";
+  return "idle";
+}
 
 function statusDotClass(status: ProjectTab["status"]) {
   switch (status) {
@@ -29,15 +32,37 @@ function statusDotClass(status: ProjectTab["status"]) {
   }
 }
 
-export function TopBar() {
-  const [tabs, setTabs] = useState<ProjectTab[]>(INITIAL_TABS);
-  const [activeTab, setActiveTab] = useState<string | null>(
-    INITIAL_TABS[0]?.id ?? null
-  );
+export function TopBar({
+  project,
+  jobStatus,
+}: {
+  project?: ProjectSummary | null;
+  jobStatus?: JobStatus | null;
+}) {
+  // Phase 1 only ever drives a single active project, so the tab list is
+  // derived directly from props on every render rather than mirrored into
+  // state via an effect. Local state only tracks UI-only overrides: a tab
+  // the user dismissed, or manually clicking a (currently single) tab.
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+  const [activeOverride, setActiveOverride] = useState<string | null>(null);
+
+  const tabs: ProjectTab[] =
+    project && !dismissedIds.has(project.id)
+      ? [
+          {
+            id: project.id,
+            name: project.slug,
+            status: jobStatusToDotStatus(jobStatus),
+          },
+        ]
+      : [];
+  const activeTab = tabs.some((t) => t.id === activeOverride)
+    ? activeOverride
+    : (tabs[0]?.id ?? null);
 
   function closeTab(id: string) {
-    setTabs((prev) => prev.filter((tab) => tab.id !== id));
-    setActiveTab((prev) => (prev === id ? null : prev));
+    setDismissedIds((prev) => new Set(prev).add(id));
+    setActiveOverride((prev) => (prev === id ? null : prev));
   }
 
   return (
@@ -68,7 +93,7 @@ export function TopBar() {
               key={tab.id}
               role="button"
               tabIndex={0}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => setActiveOverride(tab.id)}
               className={cn(
                 "group flex shrink-0 items-center gap-2 rounded-t-md border border-b-0 border-border px-3 py-1.5 text-xs transition-colors",
                 isActive
