@@ -28,7 +28,7 @@ Grounded in the screen recording (2026-04-28) of the real dashboard:
 |---|---|
 | Web app | Next.js (App Router) + Tailwind + shadcn/ui, dark theme |
 | Agent loop | **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`) — same `query()` calls in dev and production, only the credential source changes via the SDK's native `env` override on `Options`. Dev: `env` omitted → subprocess inherits the shell → falls through to the local `claude` CLI login, no `ANTHROPIC_API_KEY` needed. Production (Phase 4): `env: { ...process.env, ANTHROPIC_API_KEY: <server-held key> }` — never a per-user/per-laptop credential, same centrally-held-key + metered-credits model the real Emergent product uses ("Universal LLM Key" + `credit_ledger`). Custom `ask_user` tool via an in-process SDK MCP server; Phase 2's file-write/run-command tools are the SDK's built-in Read/Write/Edit/Bash, gated per phase via `allowedTools`. `MOCK_AGENT=1` remains the scripted fallback |
-| Code execution / preview | One `SandboxProvider` interface with a single implementation to start: Vercel Sandbox (Firecracker microVMs) — one sandbox per active session, exposes a preview URL for the iframe. A Docker implementation only if Vercel Sandbox proves limiting; never maintain both in parallel during MVP |
+| Code execution / preview | `SandboxProvider` interface. **Implemented now: `LocalProcessSandboxProvider`** — real per-session directory on this machine, agent uses the Claude Agent SDK's own built-in Write/Edit/Bash tools directly against it (no hand-rolled write_file/run_command tool schemas needed), a real `npm install` + `npm run dev -p <port>` child process per session, exposing `http://localhost:<port>` as the preview URL. Chosen because neither Vercel Sandbox (no `VERCEL_TOKEN`) nor Docker (daemon not running) were available when this phase was built. Swap in a `VercelSandboxProvider` later behind the same interface — no call-site changes needed |
 | Streaming | SSE endpoint `GET /api/jobs/:id/stream` emitting trajectory events (message, tool_call, file_written, status, question) — mirrors Emergent's `stream?job_id`. Client sends last event cursor (`Last-Event-ID` = job-scoped `events.seq`) so reconnects resume, since the append-only `events` table is the source of truth |
 | DB | Postgres (Neon via Vercel Marketplace, or local Postgres in dev) — users, projects, sessions, trajectory events, file snapshots, forks, credit ledger |
 | Auth | Clerk — added in Phase 3. Until then the app runs single-user dev mode (hardcoded user row) so the core loop is never blocked on credentials |
@@ -58,25 +58,30 @@ timeline with status lines and a stop button. Token usage per job is logged into
 from this phase on (metering data exists long before billing UI does).
 
 **Phase 2 — Sandbox build + preview + file viewer**
-Give the agent `write_file`/`run_command` against a Vercel Sandbox. Template for generated
-apps: **Next.js fullstack** (committed decision for MVP — see Risks; the FastAPI+Mongo
-template that matches the real product comes in Phase 5+).
-"Viewing N paths" cards open the tabbed read-only file viewer. When the dev server is up,
-swap the carousel for the live preview iframe. Onboarding carousel while initializing.
+`LocalProcessSandboxProvider` (see above) + a real Next.js-fullstack scaffold template.
+"Viewing N paths" cards open the tabbed read-only file viewer, driven by directory snapshots
+into the `files` table. When the dev server child process is up and responding, swap the
+carousel for the live preview iframe pointed at its local port. Onboarding carousel while
+initializing, same as Phase 1.
 
 **Phase 3 — Auth, persistence, fork, GitHub save**
-Clerk auth lands here (GitHub save needs real user identity anyway; single-user dev mode
-retired). Sessions restorable (files snapshot → new sandbox). Fork = copy session + files +
-context into a new session ("Manage Agent Context With Forks"). Save = push snapshot to a
-GitHub repo via GitHub App.
+Persistence (restore session from file snapshot) and Fork (copy session + files + context
+into a new session, "Manage Agent Context With Forks") need no external credentials — build
+and verify these for real. Clerk auth and GitHub save (octokit) are implemented against their
+real, documented APIs but **gated inert when unconfigured** (same pattern as `MOCK_AGENT`) —
+no `CLERK_SECRET_KEY`/`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` or GitHub App credentials were
+available when this phase was built, so single-user dev mode stays active and Save surfaces
+"GitHub not configured" until real keys are supplied. Code-complete, not live-verified.
 
 **Phase 4 — Deploy + credits**
-One-click deploy of the generated app (Vercel API) with env management (`envs` endpoint).
-Credit metering on token usage, Buy Credits page (Stripe). Also where the agent runtime gets
-its production credential source: a `getAgentEnv()` helper builds the Agent SDK `query()`
-call's `env` option from a server-held `ANTHROPIC_API_KEY` (secrets manager, never per-user)
-when one is configured, falling back to local CLI auth only in dev — swap point already
-confirmed to exist on `Options.env`, no agent-loop code changes needed.
+Credit ledger accounting (backfilling from token usage already logged since Phase 1) needs no
+external creds — build and verify for real. One-click deploy (Vercel API) and Stripe billing
+need `VERCEL_TOKEN`/team+project IDs and Stripe keys — neither was available; implement
+against the real APIs, gated inert without keys, same as Clerk/GitHub above. Also where the
+agent runtime gets its production credential source: a `getAgentEnv()` helper builds the
+Agent SDK `query()` call's `env` option from a server-held `ANTHROPIC_API_KEY` (secrets
+manager, never per-user) when one is configured, falling back to local CLI auth only in dev —
+swap point already confirmed to exist on `Options.env`, no agent-loop code changes needed.
 
 **Phase 5 — Polish**
 Notifications, home dashboard listing projects, attachments/assets upload ("Assets"),
