@@ -21,7 +21,13 @@ export type TimelineEventType =
   | "answer"
   | "status"
   | "usage"
-  | "error";
+  | "error"
+  // Phase 2: emitted once the build phase upserts changed files into the
+  // `files` table for this session — payload: { paths: string[] }.
+  | "files_changed"
+  // Phase 2: emitted once the sandbox's dev server responds 200 —
+  // payload: { url: string }.
+  | "preview_ready";
 
 export interface Question {
   id: string;

@@ -11,11 +11,14 @@ import type {
 
 interface AgentSessionState {
   project: ProjectSummary | null;
+  sessionId: string | null;
   jobId: string | null;
   jobStatus: JobStatus | null;
   events: TimelineEvent[];
   isStarting: boolean;
   error: string | null;
+  /** Set once a `preview_ready` event lands for the active job (Phase 2). */
+  previewUrl: string | null;
 }
 
 const EVENT_TYPES: TimelineEventType[] = [
@@ -27,17 +30,21 @@ const EVENT_TYPES: TimelineEventType[] = [
   "status",
   "usage",
   "error",
+  "files_changed",
+  "preview_ready",
 ];
 
 const TERMINAL_JOB_STATUSES = new Set<JobStatus>(["done", "stopped", "failed"]);
 
 const INITIAL_STATE: AgentSessionState = {
   project: null,
+  sessionId: null,
   jobId: null,
   jobStatus: null,
   events: [],
   isStarting: false,
   error: null,
+  previewUrl: null,
 };
 
 /**
@@ -78,6 +85,23 @@ export function useAgentSession() {
           }
         });
       }
+
+      // preview_ready also flows through the generic EVENT_TYPES loop above
+      // (so it lands in `events`), but PreviewPanel needs a dedicated
+      // `previewUrl` field to swap the carousel for the live iframe — same
+      // pattern as job_status below.
+      es.addEventListener("preview_ready", (e) => {
+        const messageEvent = e as MessageEvent<string>;
+        try {
+          const parsed = JSON.parse(messageEvent.data) as TimelineEvent;
+          const url = (parsed.payload as { url?: string }).url;
+          if (url) {
+            setState((prev) => ({ ...prev, previewUrl: url }));
+          }
+        } catch (err) {
+          console.error("Failed to parse preview_ready event", err);
+        }
+      });
 
       es.addEventListener("job_status", (e) => {
         const messageEvent = e as MessageEvent<string>;
@@ -125,15 +149,18 @@ export function useAgentSession() {
         }
         const data = (await res.json()) as {
           project: ProjectSummary;
+          session: { id: string };
           job: { id: string; status: JobStatus };
         };
         setState((prev) => ({
           ...prev,
           project: data.project,
+          sessionId: data.session.id,
           jobId: data.job.id,
           jobStatus: data.job.status,
           events: [],
           isStarting: false,
+          previewUrl: null,
         }));
         subscribe(data.job.id, -1);
       } catch (err) {

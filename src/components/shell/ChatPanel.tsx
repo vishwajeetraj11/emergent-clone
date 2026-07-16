@@ -91,6 +91,7 @@ export function ChatPanel({
   isStarting,
   error,
   hasProject,
+  sessionId,
   onSubmitPrompt,
   onAnswerQuestion,
   onStop,
@@ -100,6 +101,7 @@ export function ChatPanel({
   isStarting: boolean;
   error: string | null;
   hasProject: boolean;
+  sessionId?: string | null;
   onSubmitPrompt: (prompt: string) => void;
   onAnswerQuestion: (toolUseId: string, answers: AnswerItem[]) => void;
   onStop: () => void;
@@ -151,6 +153,7 @@ export function ChatPanel({
               events={events}
               onAnswerQuestion={onAnswerQuestion}
               disabled={answersDisabled}
+              sessionId={sessionId}
             />
             <div ref={scrollAnchorRef} />
           </div>

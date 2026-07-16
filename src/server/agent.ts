@@ -11,19 +11,21 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { appendEvent, getAllEvents, type EventRow } from "@/server/events";
 import { getJob, setAgentSessionId, setJobStatus } from "@/server/jobs";
+import { sandboxProvider, seedSandboxTemplate } from "@/server/sandbox";
+import { snapshotSessionFiles } from "@/server/files";
 import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
-// Phase 1 agent loop.
+// Phase 1 (scoping) + Phase 2 (build) agent loop.
 //
 // First turn: the model is instructed (and given exactly one tool) to call
 // `ask_user` with 3-5 clarifying questions. Once the user answers, the model
 // writes a short build plan as text; the harness (not the model) then emits
-// a few whimsical status lines and a closing summary, and marks the job
-// done.
-//
-// Real code-gen tools (write_file/run_command/sandbox) are out of scope for
-// Phase 1 — see PLAN.md Phase 2.
+// a few whimsical status lines and a closing summary. Phase 2 extends this:
+// instead of stopping there, the harness starts a real local sandbox
+// (src/server/sandbox.ts) for the job's session and runs a second query()
+// call with real Bash/Read/Write/Edit/Glob/Grep tools, `cwd`'d into that
+// sandbox directory, to actually build the app. See runBuildPhase below.
 //
 // REAL RUNTIME: the "real" (non-mock) path runs on the Claude Agent SDK
 // (`@anthropic-ai/claude-agent-sdk`), which wraps the local `claude` CLI and
@@ -40,15 +42,48 @@ import type { AnswerItem, Question } from "@/lib/types";
 // long-lived query() call per job, spanning the human's wait. That call
 // only lives in this process, so if the dev server restarts mid-run the job
 // orphans — same accepted Phase 1 limitation documented in src/server/jobs.ts.
+// The same `ask_user` tool stays registered (but not required) during the
+// Phase 2 build query, in case the model genuinely needs to ask something
+// the scoping answers didn't cover.
+//
+// KNOWN RESIDUAL RISK (Phase 2, accepted — not solved here): the build
+// query's `cwd` scopes where its Bash tool *starts*, not a hard filesystem
+// jail. The model could `cd` or use an absolute path to touch things outside
+// the sandbox directory. This is a single-user local dev tool, not a
+// multi-tenant production sandbox, so a real jail (container/chroot) is out
+// of scope for this phase.
 //
 // MOCK MODE: if MOCK_AGENT=1, we run a scripted trajectory with identical
 // event shapes so the whole system is verifiable without any model calls at
-// all.
+// all. The mock loop stops at "scoping done" (Phase 1 behavior) — it does
+// not simulate a build phase.
 // ---------------------------------------------------------------------------
 
 const MODEL = "claude-sonnet-5";
 const MAX_ITERATIONS = 15;
 const ANSWER_POLL_INTERVAL_MS = 800;
+
+// Build phase gets a much larger iteration budget than scoping — it's
+// actually writing/editing files and running commands, not just asking a
+// handful of questions.
+const BUILD_MAX_ITERATIONS = 60;
+
+// Explicit allowlist (checked against node_modules/@anthropic-ai/claude-agent-sdk
+// sdk.d.ts's `Options.tools` — `string[] | { type: 'preset'; preset: 'claude_code' }`)
+// rather than the `claude_code` preset, so the build phase gets exactly the
+// file/shell tools it needs and nothing else (no WebFetch/WebSearch/Task/...).
+const BUILD_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"];
+
+const BUILD_SYSTEM_PROMPT = `You are the build agent inside an Emergent-style AI app builder. You already scoped this app with the user in an earlier turn — you have their answers and you already wrote a build plan. You do not need to ask them anything else; build directly.
+
+Your working directory already contains a minimal Next.js (App Router) + Tailwind starter template — package.json, app/layout.tsx, app/page.tsx, tailwind/postcss config. A real \`npm run dev\` dev server for this directory is already running and being live-previewed, so:
+- Edit the existing files and add new ones to build the actual app described in the plan and the user's answers.
+- Keep \`npm run dev\` working — don't leave the app in a state that fails to compile. Feel free to use Bash to sanity-check (e.g. \`npm run build\`) if you're unsure.
+- If you need an additional npm package, install it yourself via Bash (\`npm install <package>\`).
+- Keep changes scoped to what was actually asked for — don't build unrelated features.
+- Do not run any command or read/write any file outside this working directory.
+
+Never reference the identity, email address, or account details of whoever is authenticated on the underlying CLI session.`;
 
 const SYSTEM_PROMPT = `You are the build agent inside an Emergent-style AI app builder. A user just described an app they want built in a chat box.
 
@@ -365,6 +400,10 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
 
   let askUserCalled = false;
   let sessionId: string | undefined;
+  // Accumulates the plan text the model writes after the user answers, so
+  // the Phase 2 build query below has a concrete plan to work from instead
+  // of just the raw prompt.
+  const planTextParts: string[] = [];
 
   for await (const message of q) {
     if (await isStopped(jobId)) {
@@ -376,6 +415,7 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
       let blockIndex = 0;
       for (const block of message.message.content) {
         if (block.type === "text" && block.text.trim()) {
+          planTextParts.push(block.text);
           await appendEvent(jobId, "assistant", "assistant_message", {
             text: block.text,
             stepId: message.uuid,
@@ -423,8 +463,7 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
     return;
   }
 
-  // Whimsical status effects are scripted by the harness (not the model) —
-  // Phase 2 will replace these with real build/status events.
+  // Whimsical status effects are scripted by the harness (not the model).
   for (const line of WHIMSICAL_STATUS_LINES) {
     if (await isStopped(jobId)) return;
     await appendEvent(jobId, "assistant", "status", { text: line });
@@ -434,12 +473,19 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
   if (await isStopped(jobId)) return;
 
   await runSummaryQuery(jobId, cwd);
+  if (await isStopped(jobId)) return;
+
+  const job = await getJob(jobId);
+  if (!job) return;
+
+  await runBuildPhase(jobId, job.sessionId, prompt, planTextParts.join("\n\n"));
 }
 
 /**
- * Second, short query() call for the closing summary — same tool-restricted,
- * filesystem-isolated configuration as the scoping query, but with no tools
- * at all (not even ask_user).
+ * Second, short query() call for the closing (scoping -> build transition)
+ * summary — same tool-restricted, filesystem-isolated configuration as the
+ * scoping query, but with no tools at all (not even ask_user). Does not set
+ * job status; the build phase that follows owns the terminal status.
  */
 async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
   const q = query({
@@ -487,10 +533,185 @@ async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
   if (await isStopped(jobId)) return;
 
   await appendEvent(jobId, "assistant", "assistant_message", {
-    text: summaryText.trim() || "Scoping complete — ready for the next phase.",
+    text: summaryText.trim() || "Scoping complete — starting the build now.",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: build phase — real sandbox + real Bash/Read/Write/Edit/Glob/Grep
+// ---------------------------------------------------------------------------
+
+/**
+ * Starts the session's sandbox (template seed + npm install + `npm run dev`,
+ * see src/server/sandbox.ts), runs the real build query() against it, then
+ * snapshots the sandbox directory into the `files` table. Owns the job's
+ * terminal status (done/failed) from this point on.
+ */
+async function runBuildPhase(
+  jobId: string,
+  sessionId: string,
+  originalPrompt: string,
+  planText: string
+): Promise<void> {
+  if (await isStopped(jobId)) return;
+
+  const sandboxDir = seedSandboxTemplate(sessionId);
+
+  let port: number;
+  try {
+    const result = await sandboxProvider.start(sessionId, {
+      onStatus: (text) => {
+        appendEvent(jobId, "system", "status", { text }).catch((err) => {
+          console.error(`[agent] job ${jobId} failed to append status event`, err);
+        });
+      },
+    });
+    port = result.port;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await appendEvent(jobId, "system", "error", {
+      message: `Failed to start the sandbox: ${message}`,
+    });
+    await setJobStatus(jobId, "failed");
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  if (await isStopped(jobId)) {
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  await appendEvent(jobId, "system", "preview_ready", {
+    url: `http://localhost:${port}`,
   });
 
+  const buildPrompt = `Build the app now in this working directory, based on the plan below and the original request.
+
+Original request: ${originalPrompt}
+
+Plan:
+${planText || "(no additional plan text was captured — use the original request directly)"}`;
+
+  try {
+    await runBuildQuery(jobId, sandboxDir, buildPrompt);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await appendEvent(jobId, "system", "error", { message: `Build failed: ${message}` });
+    await setJobStatus(jobId, "failed");
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  if (await isStopped(jobId)) {
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  const changed = await snapshotSessionFiles(sessionId, sandboxDir);
+  if (changed.length > 0) {
+    await appendEvent(jobId, "system", "files_changed", { paths: changed });
+  }
+
+  if (await isStopped(jobId)) {
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  await appendEvent(jobId, "assistant", "assistant_message", {
+    text: "Your app is built and running in the live preview. Keep chatting to iterate on it.",
+  });
+
+  // Deliberately NOT stopping the sandbox here — the preview iframe should
+  // keep serving the running dev server after the job finishes.
   await setJobStatus(jobId, "done");
+}
+
+/**
+ * The build query() call: real Bash/Read/Write/Edit/Glob/Grep tools, `cwd`'d
+ * into the real sandbox directory (not the Phase 1 throwaway scratch dir).
+ * `ask_user` stays registered (not required) in case the model genuinely
+ * needs to ask something scoping didn't cover — see the residual-risk note
+ * at the top of this file re: `cwd` not being a hard filesystem jail.
+ */
+async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promise<void> {
+  const emergentServer = createSdkMcpServer({
+    name: "emergent",
+    version: "1.0.0",
+    tools: [buildAskUserTool(jobId)],
+  });
+
+  const q = query({
+    prompt,
+    options: {
+      model: MODEL,
+      cwd,
+      systemPrompt: BUILD_SYSTEM_PROMPT,
+      maxTurns: BUILD_MAX_ITERATIONS,
+      tools: BUILD_TOOLS,
+      mcpServers: { emergent: emergentServer },
+      allowedTools: [...BUILD_TOOLS, "mcp__emergent__ask_user"],
+      strictMcpConfig: true,
+      settingSources: [],
+      // Fully autonomous: there is no interactive TTY/canUseTool callback in
+      // this server process to answer a permission prompt, and this phase
+      // genuinely needs Bash/Write/Edit to run unattended against the
+      // sandbox directory. Single-user local dev tool, not multi-tenant
+      // production — see the residual-risk note at the top of this file.
+      permissionMode: "bypassPermissions",
+    },
+  });
+
+  let sessionId: string | undefined;
+
+  for await (const message of q) {
+    if (await isStopped(jobId)) {
+      q.close();
+      return;
+    }
+
+    if (message.type === "assistant") {
+      let blockIndex = 0;
+      for (const block of message.message.content) {
+        if (block.type === "text" && block.text.trim()) {
+          await appendEvent(jobId, "assistant", "assistant_message", {
+            text: block.text,
+            stepId: message.uuid,
+            blockIndex: blockIndex++,
+          });
+        } else if (block.type === "tool_use") {
+          if (block.name === "mcp__emergent__ask_user") {
+            // tool_call/question events for ask_user are appended by the
+            // tool handler itself (buildAskUserTool).
+          } else {
+            await appendEvent(jobId, "assistant", "tool_call", {
+              id: block.id,
+              name: block.name,
+              input: block.input,
+            });
+          }
+          blockIndex++;
+        }
+      }
+      continue;
+    }
+
+    if (message.type === "result") {
+      sessionId = message.session_id;
+      await appendEvent(jobId, "system", "usage", {
+        model: MODEL,
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+        step: "build_query",
+      });
+
+      if (message.subtype !== "success") {
+        throw new Error(describeResultError(message));
+      }
+    }
+  }
+
+  if (sessionId) await setAgentSessionId(jobId, sessionId);
 }
 
 async function runRealLoop(jobId: string): Promise<void> {

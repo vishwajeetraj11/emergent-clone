@@ -1,6 +1,7 @@
 "use client";
 
 import { QuestionCard } from "@/components/shell/QuestionCard";
+import { FilesChangedCard } from "@/components/shell/FilesChangedCard";
 import type { AnswerItem, Question, TimelineEvent } from "@/lib/types";
 
 function findAnswerFor(
@@ -20,10 +21,12 @@ export function Timeline({
   events,
   onAnswerQuestion,
   disabled,
+  sessionId,
 }: {
   events: TimelineEvent[];
   onAnswerQuestion: (toolUseId: string, answers: AnswerItem[]) => void;
   disabled?: boolean;
+  sessionId?: string | null;
 }) {
   return (
     <>
@@ -84,6 +87,17 @@ export function Timeline({
               />
             );
           }
+          case "files_changed": {
+            const paths = (event.payload as { paths?: string[] }).paths ?? [];
+            if (paths.length === 0) return null;
+            return (
+              <FilesChangedCard
+                key={event.seq}
+                sessionId={sessionId ?? null}
+                paths={paths}
+              />
+            );
+          }
           case "error": {
             const message =
               (event.payload as { message?: string }).message ??
@@ -99,10 +113,12 @@ export function Timeline({
           }
           // tool_call, usage, and answer events don't render their own
           // timeline row — tool_call/answer surface via the question card,
-          // usage is metering-only.
+          // usage is metering-only. preview_ready has no timeline row either
+          // — it only drives PreviewPanel's iframe (see useAgentSession).
           case "tool_call":
           case "usage":
           case "answer":
+          case "preview_ready":
           default:
             return null;
         }

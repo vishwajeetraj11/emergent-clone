@@ -3,7 +3,7 @@
 import { X } from "lucide-react";
 import { OnboardingCarousel } from "@/components/shell/OnboardingCarousel";
 
-export function PreviewPanel() {
+export function PreviewPanel({ previewUrl }: { previewUrl?: string | null }) {
   return (
     <section className="flex h-full flex-1 flex-col bg-background">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
@@ -19,9 +19,23 @@ export function PreviewPanel() {
         </button>
       </header>
 
-      <div className="flex flex-1 items-center justify-center p-8">
-        <OnboardingCarousel />
-      </div>
+      {previewUrl ? (
+        // Phase 2: the sandbox is a real local child process running
+        // agent-generated code (see src/server/sandbox.ts) — sandboxed
+        // iframe attributes reflect that it's untrusted-ish generated output,
+        // not a same-origin first-party page.
+        <iframe
+          key={previewUrl}
+          src={previewUrl}
+          title="App Preview"
+          className="w-full flex-1 border-0 bg-white"
+          sandbox="allow-scripts allow-same-origin allow-forms"
+        />
+      ) : (
+        <div className="flex flex-1 items-center justify-center p-8">
+          <OnboardingCarousel />
+        </div>
+      )}
     </section>
   );
 }

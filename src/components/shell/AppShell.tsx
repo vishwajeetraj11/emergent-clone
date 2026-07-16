@@ -18,11 +18,12 @@ export function AppShell() {
           isStarting={session.isStarting}
           error={session.error}
           hasProject={Boolean(session.project)}
+          sessionId={session.sessionId}
           onSubmitPrompt={session.start}
           onAnswerQuestion={session.answerQuestion}
           onStop={session.stop}
         />
-        <PreviewPanel />
+        <PreviewPanel previewUrl={session.previewUrl} />
       </main>
     </div>
   );
