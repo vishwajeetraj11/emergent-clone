@@ -1,0 +1,2 @@
+ALTER TABLE "credit_ledger" ADD COLUMN "idempotency_key" varchar(255);--> statement-breakpoint
+CREATE UNIQUE INDEX "credit_ledger_idempotency_key_idx" ON "credit_ledger" USING btree ("idempotency_key");

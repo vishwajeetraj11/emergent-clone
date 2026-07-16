@@ -105,34 +105,37 @@ const SIGNUP_BONUS_REASON = "signup_bonus";
 
 /**
  * Grants the one-time starting balance the first time a user is seen —
- * idempotent (checks for any existing ledger row for the user first), so
- * it's safe to call on every request rather than only "on user creation".
- * Called from src/server/jobs.ts (project creation, both DEV_USER and Clerk
- * owner branches) and from GET /api/credits (so the balance is non-zero even
- * before the user's first project).
+ * idempotent via a unique index on `creditLedger.idempotencyKey` (see
+ * src/db/schema.ts), not a check-then-insert: two concurrent calls for the
+ * same brand-new user (e.g. two near-simultaneous GET /api/credits requests)
+ * both attempt the insert, and Postgres's unique constraint atomically
+ * rejects the second one via onConflictDoNothing — a plain SELECT-then-INSERT
+ * can't be made atomic this way even inside a transaction under read
+ * committed. Safe to call on every request rather than only "on user
+ * creation". Called from src/server/jobs.ts (project creation, both
+ * DEV_USER and Clerk owner branches) and from GET /api/credits (so the
+ * balance is non-zero even before the user's first project).
  */
 export async function ensureSignupBonus(userId: string): Promise<void> {
   const db = getDb();
-  const existing = await db
-    .select({ id: creditLedger.id })
-    .from(creditLedger)
-    .where(eq(creditLedger.userId, userId))
-    .limit(1);
-  if (existing.length > 0) return;
-
-  await db.insert(creditLedger).values({
-    userId,
-    delta: SIGNUP_BONUS_CREDITS,
-    reason: SIGNUP_BONUS_REASON,
-  });
+  await db
+    .insert(creditLedger)
+    .values({
+      userId,
+      delta: SIGNUP_BONUS_CREDITS,
+      reason: SIGNUP_BONUS_REASON,
+      idempotencyKey: `signup_bonus:${userId}`,
+    })
+    .onConflictDoNothing({ target: creditLedger.idempotencyKey });
 }
 
 /**
  * Grants a credit-pack purchase from a verified Stripe webhook event — see
- * src/server/stripe.ts. `stripeEventId` is folded into the ledger `reason`
- * so a retried webhook delivery (Stripe retries on non-2xx, and dedupes are
- * the caller's responsibility) can be detected and skipped rather than
- * double-granting credits.
+ * src/server/stripe.ts. `stripeEventId` is folded into `idempotencyKey`
+ * (unique-indexed, see src/db/schema.ts) so a retried or duplicate-delivered
+ * webhook (Stripe retries on non-2xx, and may also deliver the same event
+ * more than once, including near-simultaneously) atomically no-ops via
+ * onConflictDoNothing rather than racing a SELECT-then-INSERT check.
  */
 export async function grantStripePurchase(
   userId: string,
@@ -142,14 +145,15 @@ export async function grantStripePurchase(
   const db = getDb();
   const reason = `stripe_purchase:${stripeEventId}`;
 
-  const existing = await db
-    .select({ id: creditLedger.id })
-    .from(creditLedger)
-    .where(eq(creditLedger.reason, reason))
-    .limit(1);
-  if (existing.length > 0) return; // already processed this event
-
-  await db.insert(creditLedger).values({ userId, delta: credits, reason });
+  await db
+    .insert(creditLedger)
+    .values({
+      userId,
+      delta: credits,
+      reason,
+      idempotencyKey: reason,
+    })
+    .onConflictDoNothing({ target: creditLedger.idempotencyKey });
 }
 
 /** Row shape for a user, used by the small dev-user upsert below. */

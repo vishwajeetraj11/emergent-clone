@@ -29,6 +29,13 @@
       "when": 1784238459576,
       "tag": "0003_broad_northstar",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784239340179,
+      "tag": "0004_odd_korvac",
+      "breakpoints": true
     }
   ]
 }

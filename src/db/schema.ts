@@ -162,15 +162,29 @@ export const files = pgTable(
 // credit_ledger — per-token usage accounting
 // ---------------------------------------------------------------------------
 
-export const creditLedger = pgTable("credit_ledger", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  delta: integer("delta").notNull(),
-  reason: varchar("reason", { length: 255 }).notNull(),
-  jobId: uuid("job_id").references(() => jobs.id, { onDelete: "set null" }),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const creditLedger = pgTable(
+  "credit_ledger",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    delta: integer("delta").notNull(),
+    reason: varchar("reason", { length: 255 }).notNull(),
+    jobId: uuid("job_id").references(() => jobs.id, { onDelete: "set null" }),
+    // Nullable dedupe key backing atomic, race-proof idempotent grants (see
+    // src/server/credits.ts's ensureSignupBonus / grantStripePurchase) — a
+    // unique index over this column lets concurrent callers race an
+    // onConflictDoNothing insert instead of a check-then-insert that
+    // Postgres read-committed can't make atomic. Regular usage-debit rows
+    // (debitForJobUsage) leave this null; NULLs don't collide under a
+    // unique index in Postgres, so many null rows are fine.
+    idempotencyKey: varchar("idempotency_key", { length: 255 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("credit_ledger_idempotency_key_idx").on(t.idempotencyKey),
+  ]
+);
