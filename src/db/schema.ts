@@ -36,6 +36,10 @@ export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: varchar("email", { length: 255 }).notNull().unique(),
   name: varchar("name", { length: 255 }),
+  // Phase 3: nullable, only ever populated when Clerk is configured (see
+  // src/lib/auth.ts's isClerkConfigured()) — single-user dev mode (the
+  // default, unconfigured behavior) never touches this column.
+  clerkUserId: varchar("clerk_user_id", { length: 255 }).unique(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -74,6 +78,10 @@ export const sessions = pgTable("sessions", {
     (): AnyPgColumn => sessions.id,
     { onDelete: "set null" }
   ),
+  // Phase 3: last GitHub repo this session's files were pushed to (Save
+  // button), nullable — stays null until a real GITHUB_TOKEN is configured
+  // and a save actually succeeds.
+  githubRepoUrl: text("github_repo_url"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

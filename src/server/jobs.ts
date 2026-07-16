@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { jobs, projects, sessions, users } from "@/db/schema";
 import { DEV_USER } from "@/lib/dev-user";
+import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
 import type { JobStatus } from "@/lib/types";
 import { appendEvent } from "@/server/events";
 import { isUniqueViolation } from "@/server/db-utils";
@@ -17,7 +18,8 @@ const MAX_SLUG_ATTEMPTS = 5;
 /**
  * Single-user dev mode (Phase 0-2, see src/lib/dev-user.ts): make sure the
  * fixed dev user row exists before we FK anything to it. Idempotent — safe
- * to call on every request.
+ * to call on every request. Phase 3: only runs when Clerk isn't configured;
+ * when it is, getCurrentUser() below already upserts the real user's row.
  */
 async function ensureDevUser() {
   const db = getDb();
@@ -41,7 +43,19 @@ async function ensureDevUser() {
  */
 export async function createProjectAndJob(prompt: string) {
   const db = getDb();
-  await ensureDevUser();
+
+  // Phase 3: isClerkConfigured() gates which user this project is owned by.
+  // Unconfigured (default, always-tested): ensureDevUser + DEV_USER.id,
+  // unchanged from Phase 0-2. Configured: getCurrentUser() resolves (and
+  // upserts) the real signed-in Clerk user's row instead — unverified, no
+  // real keys in this environment.
+  let owner: { id: string };
+  if (isClerkConfigured()) {
+    owner = await getCurrentUser();
+  } else {
+    await ensureDevUser();
+    owner = DEV_USER;
+  }
 
   const trimmed = prompt.trim();
   if (!trimmed) {
@@ -54,7 +68,7 @@ export async function createProjectAndJob(prompt: string) {
     try {
       [project] = await db
         .insert(projects)
-        .values({ userId: DEV_USER.id, name: slug, slug })
+        .values({ userId: owner.id, name: slug, slug })
         .returning();
       break;
     } catch (err) {

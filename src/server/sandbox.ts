@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -31,11 +31,33 @@ export interface SandboxStartOptions {
   onStatus?: (text: string) => void;
 }
 
+export interface SnapshotFile {
+  path: string;
+  content: string;
+}
+
 export interface SandboxProvider {
   /** Idempotent: calling twice for a session already running just returns its port. */
   start(sessionId: string, options?: SandboxStartOptions): Promise<SandboxStartResult>;
   stop(sessionId: string): Promise<void>;
   getStatus(sessionId: string): SandboxStatus;
+  /**
+   * Phase 3 persistence/fork primitive: writes a `files`-table snapshot back
+   * onto disk for `sessionId` (creating its sandbox directory if needed —
+   * "possibly new", e.g. a session that never had a live process in this
+   * server instance, or a freshly forked session), then starts it exactly
+   * like `start()`. If the session already has a live sandbox running,
+   * returns its existing port without touching anything on disk. This is
+   * what turns the Phase 1/2 "orphaned sandbox" limitation into something
+   * recoverable: the `files` table (already durable in Postgres) is enough
+   * to bring a dev server back up in a brand new process, no agent rebuild
+   * required.
+   */
+  restoreFromSnapshot(
+    sessionId: string,
+    files: SnapshotFile[],
+    options?: SandboxStartOptions
+  ): Promise<SandboxStartResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +85,31 @@ const TEMPLATE_DIR = path.join(process.cwd(), "src", "server", "sandbox-template
 
 export function getSandboxDir(sessionId: string): string {
   return path.join(SANDBOX_ROOT, sessionId);
+}
+
+/**
+ * Writes a `files`-table snapshot onto disk under `dir`, creating parent
+ * directories as needed. Used by both session restore (persistence) and
+ * fork (copying the parent session's files onto the new session's own
+ * sandbox path) — see SandboxProvider.restoreFromSnapshot and
+ * src/server/sessions.ts's forkSession.
+ *
+ * `path.join(dir, relPath)` alone would let a malicious/malformed relative
+ * path (e.g. containing `..`) escape `dir`; every resolved path is checked
+ * to still be inside `dir` before writing, same defense-in-depth spirit as
+ * the build query's cwd note in src/server/agent.ts.
+ */
+export function writeSnapshotFiles(dir: string, files: SnapshotFile[]): void {
+  mkdirSync(dir, { recursive: true });
+  const root = path.resolve(dir);
+  for (const file of files) {
+    const fullPath = path.resolve(root, file.path);
+    if (fullPath !== root && !fullPath.startsWith(root + path.sep)) {
+      continue; // would escape the sandbox directory — skip
+    }
+    mkdirSync(path.dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, file.content, "utf8");
+  }
 }
 
 /**
@@ -258,6 +305,48 @@ async function waitForServerReady(
   );
 }
 
+/**
+ * A truly orphaned sandbox child (see the RegistryEntry doc comment above —
+ * `detached: true` means it outlives this harness process) is exactly what
+ * a Phase 3 restore has to cope with: after a harness restart, the
+ * in-memory registry has no record of it, so a naive restore always tries
+ * to spawn a brand new dev server for the session's directory. Next.js
+ * itself refuses that — it detects another instance already running
+ * against the same project directory (regardless of the port we asked for)
+ * and exits immediately, printing the port the *existing* instance is on.
+ * Detected here so restore can reuse that still-alive server instead of
+ * failing outright.
+ */
+const ALREADY_RUNNING_PORT_RE =
+  /Another next dev server is already running[\s\S]*?(?:Local:\s*)?https?:\/\/localhost:(\d+)/i;
+
+function parseAlreadyRunningPort(tail: string): number | null {
+  const match = ALREADY_RUNNING_PORT_RE.exec(tail);
+  if (!match) return null;
+  const port = Number.parseInt(match[1], 10);
+  return Number.isFinite(port) ? port : null;
+}
+
+/** Like waitForServerReady, but for a process we don't own (no ChildProcess
+ * handle to check exitCode against) — just polls for a 200. */
+async function pollUntilReady(port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  const url = `http://127.0.0.1:${port}/`;
+  while (Date.now() < deadline) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1500);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) return true;
+    } catch {
+      // Not up yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
 function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve(true);
@@ -374,24 +463,66 @@ export class LocalProcessSandboxProvider implements SandboxProvider {
     try {
       await waitForServerReady(port, 60_000, child);
     } catch (err) {
-      const tail = entry.devLogTail.trim().slice(-1500);
+      const tail = entry.devLogTail;
+
+      // This session's directory may already have a live, still-running dev
+      // server from before a harness restart (a genuinely orphaned but
+      // healthy child — see parseAlreadyRunningPort's doc comment). Next.js
+      // refused our spawn because of it; reuse that existing server instead
+      // of treating this as a real failure.
+      const existingPort = parseAlreadyRunningPort(tail);
+      if (existingPort) {
+        await killProcessTree(child).catch(() => {});
+        const reachable = await pollUntilReady(existingPort, 15_000);
+        if (reachable) {
+          registry.set(sessionId, {
+            port: existingPort,
+            child: null, // we don't own this process — same as a stop()'d entry
+            state: "running",
+            devLogTail: "",
+          });
+          return { port: existingPort };
+        }
+      }
+
+      const trimmedTail = tail.trim().slice(-1500);
       await killProcessTree(child);
       registry.set(sessionId, {
         port,
         child: null,
         state: "error",
-        message: `${err instanceof Error ? err.message : String(err)}${tail ? `\n${tail}` : ""}`,
+        message: `${err instanceof Error ? err.message : String(err)}${trimmedTail ? `\n${trimmedTail}` : ""}`,
         devLogTail: "",
       });
       throw new Error(
         `Dev server never came up: ${err instanceof Error ? err.message : String(err)}${
-          tail ? `\n${tail}` : ""
+          trimmedTail ? `\n${trimmedTail}` : ""
         }`
       );
     }
 
     entry.state = "running";
     return { port };
+  }
+
+  async restoreFromSnapshot(
+    sessionId: string,
+    files: SnapshotFile[],
+    options?: SandboxStartOptions
+  ): Promise<SandboxStartResult> {
+    const status = this.getStatus(sessionId);
+    if (status.state === "running" && status.port) {
+      // A "running" entry with no owned child process (see the reuse path
+      // in doStart above, adopted from a still-alive orphan) is only ever a
+      // best-effort record — that process can die silently later without
+      // this registry finding out. Re-probe before trusting it, so a
+      // restore call always reflects real reachability instead of a
+      // possibly-stale cached status.
+      const stillAlive = await pollUntilReady(status.port, 2000);
+      if (stillAlive) return { port: status.port };
+    }
+    writeSnapshotFiles(getSandboxDir(sessionId), files);
+    return this.start(sessionId, options);
   }
 
   async stop(sessionId: string): Promise<void> {

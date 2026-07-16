@@ -35,9 +35,16 @@ function statusDotClass(status: ProjectTab["status"]) {
 export function TopBar({
   project,
   jobStatus,
+  onNavigateHome,
+  onSelectProject,
 }: {
   project?: ProjectSummary | null;
   jobStatus?: JobStatus | null;
+  /** Phase 3: real navigation for the Home button — back to `/` (the
+   * "what will you build" composer), not just a visual reset. */
+  onNavigateHome?: () => void;
+  /** Phase 3: real navigation for a project tab — to /p/[projectId]. */
+  onSelectProject?: (projectId: string) => void;
 }) {
   // Phase 1 only ever drives a single active project, so the tab list is
   // derived directly from props on every render rather than mirrored into
@@ -78,7 +85,12 @@ export function TopBar({
         >
           App builder
         </button>
-        <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="gap-1.5 text-muted-foreground"
+          onClick={onNavigateHome}
+        >
           <Home className="size-3.5" />
           Home
         </Button>
@@ -93,7 +105,10 @@ export function TopBar({
               key={tab.id}
               role="button"
               tabIndex={0}
-              onClick={() => setActiveOverride(tab.id)}
+              onClick={() => {
+                setActiveOverride(tab.id);
+                onSelectProject?.(tab.id);
+              }}
               className={cn(
                 "group flex shrink-0 items-center gap-2 rounded-t-md border border-b-0 border-border px-3 py-1.5 text-xs transition-colors",
                 isActive

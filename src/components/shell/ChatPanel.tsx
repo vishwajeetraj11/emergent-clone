@@ -19,6 +19,7 @@ import {
 import { Timeline } from "@/components/shell/Timeline";
 import { cn } from "@/lib/utils";
 import type { AnswerItem, JobStatus, TimelineEvent } from "@/lib/types";
+import type { SaveState } from "@/lib/hooks/useAgentSession";
 
 // lucide-react dropped brand marks, so the GitHub logo is inlined here.
 function GithubIcon(props: React.SVGProps<SVGSVGElement>) {
@@ -32,15 +33,21 @@ function GithubIcon(props: React.SVGProps<SVGSVGElement>) {
 function IconAction({
   icon,
   label,
+  onClick,
+  disabled,
 }: {
   icon: React.ReactNode;
   label: string;
+  onClick?: () => void;
+  disabled?: boolean;
 }) {
   return (
     <Tooltip>
       <TooltipTrigger
         aria-label={label}
-        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+        onClick={onClick}
+        disabled={disabled}
+        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
       >
         {icon}
       </TooltipTrigger>
@@ -48,6 +55,13 @@ function IconAction({
     </Tooltip>
   );
 }
+
+const SAVE_STATUS_TEXT: Record<Exclude<SaveState, "idle">, (message: string | null, url: string | null) => string> = {
+  saving: () => "Saving to GitHub…",
+  done: (_message, url) => (url ? `Saved to GitHub: ${url}` : "Saved to GitHub."),
+  error: (message) => message ?? "Failed to save to GitHub.",
+  not_configured: (message) => message ?? "GitHub is not configured in this environment.",
+};
 
 const STATUS_STRIP_CONFIG: Record<
   JobStatus,
@@ -85,6 +99,8 @@ function StatusStrip({ jobStatus }: { jobStatus: JobStatus | null }) {
   );
 }
 
+const TERMINAL_STATUSES = new Set<JobStatus>(["done", "stopped", "failed"]);
+
 export function ChatPanel({
   events,
   jobStatus,
@@ -92,9 +108,17 @@ export function ChatPanel({
   error,
   hasProject,
   sessionId,
+  isForking = false,
+  isSendingMessage = false,
+  saveState = "idle",
+  saveMessage = null,
+  saveUrl = null,
   onSubmitPrompt,
   onAnswerQuestion,
   onStop,
+  onContinueChat,
+  onFork,
+  onSave,
 }: {
   events: TimelineEvent[];
   jobStatus: JobStatus | null;
@@ -102,9 +126,17 @@ export function ChatPanel({
   error: string | null;
   hasProject: boolean;
   sessionId?: string | null;
+  isForking?: boolean;
+  isSendingMessage?: boolean;
+  saveState?: SaveState;
+  saveMessage?: string | null;
+  saveUrl?: string | null;
   onSubmitPrompt: (prompt: string) => void;
   onAnswerQuestion: (toolUseId: string, answers: AnswerItem[]) => void;
   onStop: () => void;
+  onContinueChat?: (prompt: string) => void;
+  onFork?: () => void;
+  onSave?: () => void;
 }) {
   const [message, setMessage] = useState("");
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -113,10 +145,22 @@ export function ChatPanel({
     scrollAnchorRef.current?.scrollIntoView({ block: "end" });
   }, [events.length]);
 
+  // Once a job reaches a terminal status, the session (and its sandbox) is
+  // still there — Phase 3 lets the user keep chatting against it (a new job
+  // under the same session; see continueChat in useAgentSession) instead of
+  // being stuck answering questions forever.
+  const canContinueChat = hasProject && TERMINAL_STATUSES.has(jobStatus ?? "running");
+  const composerDisabled =
+    isStarting || isSendingMessage || (hasProject && !canContinueChat);
+
   function handleSubmit() {
     const trimmed = message.trim();
-    if (!trimmed || hasProject || isStarting) return;
-    onSubmitPrompt(trimmed);
+    if (!trimmed || composerDisabled) return;
+    if (hasProject) {
+      onContinueChat?.(trimmed);
+    } else {
+      onSubmitPrompt(trimmed);
+    }
     setMessage("");
   }
 
@@ -131,9 +175,9 @@ export function ChatPanel({
   const answersDisabled = jobStatus !== "waiting_on_user";
 
   return (
-    <aside className="flex h-full w-[440px] shrink-0 flex-col border-r border-border bg-background">
+    <aside className="flex h-full min-h-0 w-[440px] shrink-0 flex-col border-r border-border bg-background">
       {/* Timeline */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="min-h-0 flex-1">
         {events.length === 0 ? (
           <div className="flex h-full min-h-[420px] flex-col items-center justify-center gap-3 px-8 py-16 text-center">
             <div className="flex size-10 items-center justify-center rounded-full bg-secondary">
@@ -169,27 +213,54 @@ export function ChatPanel({
         )}
         <StatusStrip jobStatus={jobStatus} />
 
+        {saveState !== "idle" && (
+          <div
+            className={cn(
+              "mb-2 rounded-md px-2.5 py-1.5 text-xs",
+              saveState === "error"
+                ? "bg-red-500/10 text-red-400"
+                : saveState === "not_configured"
+                  ? "bg-secondary/60 text-muted-foreground"
+                  : "bg-emerald-500/10 text-emerald-400"
+            )}
+          >
+            {SAVE_STATUS_TEXT[saveState](saveMessage, saveUrl)}
+          </div>
+        )}
+
         <div className="rounded-lg border border-input bg-input/20 p-2 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50">
           <Textarea
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              hasProject
-                ? "Answer the agent's questions above…"
-                : "What will you build today?"
+              canContinueChat
+                ? "Keep chatting to continue building…"
+                : hasProject
+                  ? "Answer the agent's questions above…"
+                  : "What will you build today?"
             }
-            disabled={hasProject || isStarting}
+            disabled={composerDisabled}
             className="min-h-16 resize-none border-none bg-transparent p-1 shadow-none focus-visible:ring-0 disabled:opacity-50"
           />
           <div className="flex items-center justify-between pt-1">
             <div className="flex items-center gap-0.5">
               <IconAction icon={<Paperclip className="size-4" />} label="Attach" />
-              <IconAction icon={<GithubIcon className="size-4" />} label="Save" />
-              <IconAction icon={<GitFork className="size-4" />} label="Fork" />
+              <IconAction
+                icon={<GithubIcon className="size-4" />}
+                label="Save"
+                onClick={onSave}
+                disabled={!hasProject || !onSave || saveState === "saving"}
+              />
+              <IconAction
+                icon={<GitFork className="size-4" />}
+                label="Fork"
+                onClick={onFork}
+                disabled={!hasProject || !onFork || isForking}
+              />
               <IconAction icon={<Mic className="size-4" />} label="Voice input" />
             </div>
-            {hasProject ? (
+            {isActive ? (
               <Tooltip>
                 <TooltipTrigger
                   aria-label="Stop agent"
@@ -206,7 +277,7 @@ export function ChatPanel({
                 <TooltipTrigger
                   aria-label="Send"
                   onClick={handleSubmit}
-                  disabled={!message.trim() || isStarting}
+                  disabled={!message.trim() || composerDisabled}
                   className="flex size-7 items-center justify-center rounded-md bg-foreground text-background transition-colors hover:bg-foreground/80 disabled:opacity-40"
                 >
                   <ArrowUp className="size-3.5" />

@@ -9,6 +9,8 @@ import type {
   TimelineEventType,
 } from "@/lib/types";
 
+export type SaveState = "idle" | "saving" | "done" | "error" | "not_configured";
+
 interface AgentSessionState {
   project: ProjectSummary | null;
   sessionId: string | null;
@@ -17,8 +19,22 @@ interface AgentSessionState {
   events: TimelineEvent[];
   isStarting: boolean;
   error: string | null;
-  /** Set once a `preview_ready` event lands for the active job (Phase 2). */
+  /** Set once a `preview_ready` event lands for the active job (Phase 2), or
+   * once a Phase 3 sandbox restore/fork resolves a port directly. */
   previewUrl: string | null;
+  /** Phase 3: loading an existing project by id (GET /api/projects/[id]). */
+  isLoadingProject: boolean;
+  /** Phase 3: POST /api/sessions/[id]/restore is in flight. */
+  isRestoringPreview: boolean;
+  restoreError: string | null;
+  /** Phase 3: POST /api/sessions/[id]/fork is in flight. */
+  isForking: boolean;
+  /** Phase 3: sending a new top-level message against an existing session
+   * (continuing to chat after a job reached a terminal status). */
+  isSendingMessage: boolean;
+  saveState: SaveState;
+  saveMessage: string | null;
+  saveUrl: string | null;
 }
 
 const EVENT_TYPES: TimelineEventType[] = [
@@ -45,13 +61,22 @@ const INITIAL_STATE: AgentSessionState = {
   isStarting: false,
   error: null,
   previewUrl: null,
+  isLoadingProject: false,
+  isRestoringPreview: false,
+  restoreError: null,
+  isForking: false,
+  isSendingMessage: false,
+  saveState: "idle",
+  saveMessage: null,
+  saveUrl: null,
 };
 
 /**
- * Owns the Phase 1 chat/agent-loop client state: creating a project+job,
- * subscribing to its SSE event stream (with Last-Event-ID resume handled by
- * the browser's native EventSource reconnect), answering clarifying
- * questions, and stopping the job.
+ * Owns the chat/agent-loop client state: creating a project+job (Phase 1),
+ * subscribing to its SSE event stream (Phase 1), answering clarifying
+ * questions (Phase 1), and — Phase 3 — loading an existing project by id,
+ * restoring its sandbox from the `files` snapshot, forking a session, and
+ * continuing to chat against an existing session once its job is done.
  */
 export function useAgentSession() {
   const [state, setState] = useState<AgentSessionState>(INITIAL_STATE);
@@ -134,8 +159,43 @@ export function useAgentSession() {
 
   useEffect(() => closeStream, [closeStream]);
 
+  /**
+   * Phase 3: tries to bring a session's sandbox up from its `files`
+   * snapshot and reflect the resulting preview URL — used both after
+   * loading an existing project (persistence) and right after a fork
+   * (independent sandbox for the new session). A 404 (no snapshot yet,
+   * e.g. a session still mid-scoping) is not an error, just "nothing to
+   * restore yet".
+   */
+  const attemptRestorePreview = useCallback(async (sessionId: string) => {
+    setState((prev) => ({ ...prev, isRestoringPreview: true, restoreError: null }));
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/restore`, { method: "POST" });
+      if (res.status === 404) {
+        setState((prev) => ({ ...prev, isRestoringPreview: false }));
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `Request failed (${res.status})`);
+      }
+      const data = (await res.json()) as { url: string };
+      setState((prev) => ({
+        ...prev,
+        previewUrl: data.url,
+        isRestoringPreview: false,
+      }));
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        isRestoringPreview: false,
+        restoreError: err instanceof Error ? err.message : "Failed to restore sandbox",
+      }));
+    }
+  }, []);
+
   const start = useCallback(
-    async (prompt: string) => {
+    async (prompt: string, onCreated?: (projectId: string) => void) => {
       setState((prev) => ({ ...prev, isStarting: true, error: null }));
       try {
         const res = await fetch("/api/projects", {
@@ -163,6 +223,7 @@ export function useAgentSession() {
           previewUrl: null,
         }));
         subscribe(data.job.id, -1);
+        onCreated?.(data.project.id);
       } catch (err) {
         setState((prev) => ({
           ...prev,
@@ -172,6 +233,47 @@ export function useAgentSession() {
       }
     },
     [subscribe]
+  );
+
+  /**
+   * Phase 3 persistence entry point: loads an existing project by id
+   * (GET /api/projects/[id]), replays its latest job's full event history
+   * over SSE from cursor -1, and — if the session has a `files` snapshot —
+   * tries to restore its sandbox so the preview iframe comes back too.
+   */
+  const loadProject = useCallback(
+    async (projectId: string) => {
+      setState(() => ({ ...INITIAL_STATE, isLoadingProject: true }));
+      try {
+        const res = await fetch(`/api/projects/${projectId}`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `Request failed (${res.status})`);
+        }
+        const data = (await res.json()) as {
+          project: ProjectSummary;
+          session: { id: string } | null;
+          job: { id: string; status: JobStatus } | null;
+        };
+        setState((prev) => ({
+          ...prev,
+          project: data.project,
+          sessionId: data.session?.id ?? null,
+          jobId: data.job?.id ?? null,
+          jobStatus: data.job?.status ?? null,
+          isLoadingProject: false,
+        }));
+        if (data.job) subscribe(data.job.id, -1);
+        if (data.session) attemptRestorePreview(data.session.id);
+      } catch (err) {
+        setState((prev) => ({
+          ...prev,
+          isLoadingProject: false,
+          error: err instanceof Error ? err.message : "Failed to load project",
+        }));
+      }
+    },
+    [subscribe, attemptRestorePreview]
   );
 
   const answerQuestion = useCallback(
@@ -209,5 +311,147 @@ export function useAgentSession() {
     }
   }, [state.jobId]);
 
-  return { ...state, start, answerQuestion, stop };
+  /**
+   * Continues chatting against the *current* session once its job has
+   * reached a terminal status (done/stopped/failed) — creates a new job
+   * under the same session (see continueSessionWithPrompt) and replaces the
+   * visible timeline with that new job's own events. The `events` table's
+   * seq is job-scoped, so a fresh job's timeline necessarily starts over
+   * rather than appending to the previous job's — same as switching to a
+   * forked session.
+   */
+  const continueChat = useCallback(
+    async (prompt: string) => {
+      const sessionId = state.sessionId;
+      if (!sessionId) return;
+      setState((prev) => ({ ...prev, isSendingMessage: true, error: null }));
+      try {
+        const res = await fetch(`/api/sessions/${sessionId}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `Request failed (${res.status})`);
+        }
+        const data = (await res.json()) as { job: { id: string; status: JobStatus } };
+        setState((prev) => ({
+          ...prev,
+          jobId: data.job.id,
+          jobStatus: data.job.status,
+          events: [],
+          isSendingMessage: false,
+        }));
+        subscribe(data.job.id, -1);
+      } catch (err) {
+        setState((prev) => ({
+          ...prev,
+          isSendingMessage: false,
+          error: err instanceof Error ? err.message : "Failed to send message",
+        }));
+      }
+    },
+    [state.sessionId, subscribe]
+  );
+
+  /**
+   * Forks the current session: new session under the same project, files
+   * copied (DB + its own on-disk sandbox path), synthetic history seeded.
+   * Switches all client state to the fork (new sessionId/jobId, fresh
+   * timeline) and kicks off an independent sandbox restore for it — the
+   * original session's job/events/sandbox are never touched.
+   */
+  const fork = useCallback(async () => {
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    setState((prev) => ({ ...prev, isForking: true, error: null }));
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/fork`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `Request failed (${res.status})`);
+      }
+      const data = (await res.json()) as {
+        session: { id: string };
+        job: { id: string; status: JobStatus };
+      };
+      setState((prev) => ({
+        ...prev,
+        sessionId: data.session.id,
+        jobId: data.job.id,
+        jobStatus: data.job.status,
+        events: [],
+        previewUrl: null,
+        isForking: false,
+        saveState: "idle",
+        saveMessage: null,
+        saveUrl: null,
+      }));
+      subscribe(data.job.id, -1);
+      attemptRestorePreview(data.session.id);
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        isForking: false,
+        error: err instanceof Error ? err.message : "Failed to fork session",
+      }));
+    }
+  }, [state.sessionId, subscribe, attemptRestorePreview]);
+
+  /** GitHub save (Half B — see src/server/github.ts): gated inert when
+   * GITHUB_TOKEN isn't configured, surfaced as saveState "not_configured"
+   * rather than a silent no-op or a thrown error. */
+  const saveToGitHub = useCallback(async () => {
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    setState((prev) => ({ ...prev, saveState: "saving", saveMessage: null }));
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/save-github`, { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as {
+        configured?: boolean;
+        url?: string;
+        error?: string;
+      };
+      if (!res.ok || data.error) {
+        setState((prev) => ({
+          ...prev,
+          saveState: data.configured === false ? "not_configured" : "error",
+          saveMessage: data.error ?? `Request failed (${res.status})`,
+        }));
+        return;
+      }
+      if (data.configured === false) {
+        setState((prev) => ({
+          ...prev,
+          saveState: "not_configured",
+          saveMessage: data.error ?? "GitHub is not configured in this environment.",
+        }));
+        return;
+      }
+      setState((prev) => ({
+        ...prev,
+        saveState: "done",
+        saveUrl: data.url ?? null,
+        saveMessage: null,
+      }));
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        saveState: "error",
+        saveMessage: err instanceof Error ? err.message : "Failed to save to GitHub",
+      }));
+    }
+  }, [state.sessionId]);
+
+  return {
+    ...state,
+    start,
+    loadProject,
+    answerQuestion,
+    stop,
+    continueChat,
+    fork,
+    saveToGitHub,
+  };
 }
