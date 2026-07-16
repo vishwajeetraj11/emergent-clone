@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Bell, Home, Plus, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -52,6 +52,74 @@ export function TopBar({
   // the user dismissed, or manually clicking a (currently single) tab.
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
   const [activeOverride, setActiveOverride] = useState<string | null>(null);
+
+  // Phase 4 (Half A, REAL): the "Buy Credits" button now reflects the
+  // signed-in user's actual credit_ledger balance (GET /api/credits) instead
+  // of being a purely decorative label. Refetched whenever the active job's
+  // status changes, since a running/just-finished job is exactly when new
+  // `usage` events (and their matching ledger debits) land.
+  const [balance, setBalance] = useState<number | null>(null);
+  // Phase 4 (Half B, gated inert): clicking the button attempts a real
+  // Stripe Checkout session (src/server/stripe.ts) when configured, and
+  // surfaces "Stripe is not configured" otherwise — never a silent no-op.
+  const [buyStatus, setBuyStatus] = useState<
+    "idle" | "loading" | "not_configured" | "error"
+  >("idle");
+  const [buyMessage, setBuyMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/credits")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { balance?: number } | null) => {
+        if (!cancelled && data && typeof data.balance === "number") {
+          setBalance(data.balance);
+        }
+      })
+      .catch(() => {
+        // Balance display is best-effort — no DB configured yet, etc.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [jobStatus]);
+
+  async function handleBuyCredits() {
+    setBuyStatus("loading");
+    setBuyMessage(null);
+    try {
+      const res = await fetch("/api/billing/checkout", { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as {
+        configured?: boolean;
+        url?: string;
+        error?: string;
+      };
+      if (data.configured === false) {
+        setBuyStatus("not_configured");
+        setBuyMessage(
+          data.error ?? "Stripe is not configured in this environment."
+        );
+        return;
+      }
+      if (!res.ok || data.error || !data.url) {
+        setBuyStatus("error");
+        setBuyMessage(data.error ?? `Request failed (${res.status})`);
+        return;
+      }
+      setBuyStatus("idle");
+      window.location.href = data.url;
+    } catch (err) {
+      setBuyStatus("error");
+      setBuyMessage(
+        err instanceof Error ? err.message : "Failed to start checkout"
+      );
+    }
+  }
+
+  const buyTooltipText =
+    buyStatus === "not_configured" || buyStatus === "error"
+      ? (buyMessage ?? "Something went wrong.")
+      : "Your current credit balance — click to buy more.";
 
   const tabs: ProjectTab[] =
     project && !dismissedIds.has(project.id)
@@ -149,12 +217,17 @@ export function TopBar({
 
       {/* Right cluster */}
       <div className="flex shrink-0 items-center gap-2">
-        <Button
-          size="sm"
-          className="gap-1.5 bg-yellow-400 text-yellow-950 hover:bg-yellow-300"
-        >
-          Buy Credits
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            aria-label="Buy credits"
+            onClick={handleBuyCredits}
+            disabled={buyStatus === "loading"}
+            className="flex h-7 items-center gap-1.5 rounded-[min(var(--radius-md),12px)] bg-yellow-400 px-2.5 text-[0.8rem] font-medium text-yellow-950 transition-colors hover:bg-yellow-300 disabled:pointer-events-none disabled:opacity-50"
+          >
+            {balance !== null ? `${balance.toLocaleString()} credits` : "Buy Credits"}
+          </TooltipTrigger>
+          <TooltipContent>{buyTooltipText}</TooltipContent>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger
             aria-label="Notifications"

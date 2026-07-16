@@ -57,12 +57,16 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
           saveState={session.saveState}
           saveMessage={session.saveMessage}
           saveUrl={session.saveUrl}
+          deployState={session.deployState}
+          deployMessage={session.deployMessage}
+          deployUrl={session.deployUrl}
           onSubmitPrompt={(prompt) => session.start(prompt, handleCreated)}
           onAnswerQuestion={session.answerQuestion}
           onStop={session.stop}
           onContinueChat={session.continueChat}
           onFork={session.fork}
           onSave={session.saveToGitHub}
+          onDeploy={session.deployToVercel}
         />
         <PreviewPanel
           previewUrl={session.previewUrl}

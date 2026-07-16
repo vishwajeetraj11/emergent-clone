@@ -82,6 +82,10 @@ export const sessions = pgTable("sessions", {
   // button), nullable — stays null until a real GITHUB_TOKEN is configured
   // and a save actually succeeds.
   githubRepoUrl: text("github_repo_url"),
+  // Phase 4: last Vercel deployment URL for this session's files ("Deploy
+  // Your Application"), nullable — stays null until a real VERCEL_TOKEN is
+  // configured and a deploy actually succeeds. Mirrors githubRepoUrl above.
+  vercelDeploymentUrl: text("vercel_deployment_url"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

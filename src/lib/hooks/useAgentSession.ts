@@ -10,6 +10,7 @@ import type {
 } from "@/lib/types";
 
 export type SaveState = "idle" | "saving" | "done" | "error" | "not_configured";
+export type DeployState = "idle" | "deploying" | "done" | "error" | "not_configured";
 
 interface AgentSessionState {
   project: ProjectSummary | null;
@@ -35,6 +36,10 @@ interface AgentSessionState {
   saveState: SaveState;
   saveMessage: string | null;
   saveUrl: string | null;
+  /** Phase 4 (Half B, gated inert): Vercel deploy — see src/server/vercel.ts. */
+  deployState: DeployState;
+  deployMessage: string | null;
+  deployUrl: string | null;
 }
 
 const EVENT_TYPES: TimelineEventType[] = [
@@ -69,6 +74,9 @@ const INITIAL_STATE: AgentSessionState = {
   saveState: "idle",
   saveMessage: null,
   saveUrl: null,
+  deployState: "idle",
+  deployMessage: null,
+  deployUrl: null,
 };
 
 /**
@@ -387,6 +395,9 @@ export function useAgentSession() {
         saveState: "idle",
         saveMessage: null,
         saveUrl: null,
+        deployState: "idle",
+        deployMessage: null,
+        deployUrl: null,
       }));
       subscribe(data.job.id, -1);
       attemptRestorePreview(data.session.id);
@@ -444,6 +455,51 @@ export function useAgentSession() {
     }
   }, [state.sessionId]);
 
+  /** Vercel deploy (Half B — see src/server/vercel.ts): gated inert when
+   * VERCEL_TOKEN isn't configured, surfaced as deployState "not_configured"
+   * rather than a silent no-op or a thrown error. */
+  const deployToVercel = useCallback(async () => {
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    setState((prev) => ({ ...prev, deployState: "deploying", deployMessage: null }));
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/deploy-vercel`, { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as {
+        configured?: boolean;
+        url?: string;
+        error?: string;
+      };
+      if (!res.ok || data.error) {
+        setState((prev) => ({
+          ...prev,
+          deployState: data.configured === false ? "not_configured" : "error",
+          deployMessage: data.error ?? `Request failed (${res.status})`,
+        }));
+        return;
+      }
+      if (data.configured === false) {
+        setState((prev) => ({
+          ...prev,
+          deployState: "not_configured",
+          deployMessage: data.error ?? "Vercel deploy is not configured in this environment.",
+        }));
+        return;
+      }
+      setState((prev) => ({
+        ...prev,
+        deployState: "done",
+        deployUrl: data.url ?? null,
+        deployMessage: null,
+      }));
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        deployState: "error",
+        deployMessage: err instanceof Error ? err.message : "Failed to deploy to Vercel",
+      }));
+    }
+  }, [state.sessionId]);
+
   return {
     ...state,
     start,
@@ -453,5 +509,6 @@ export function useAgentSession() {
     continueChat,
     fork,
     saveToGitHub,
+    deployToVercel,
   };
 }

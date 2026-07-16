@@ -7,6 +7,7 @@ import {
   Mic,
   MessageSquareDashed,
   Paperclip,
+  Rocket,
   Square,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -19,7 +20,7 @@ import {
 import { Timeline } from "@/components/shell/Timeline";
 import { cn } from "@/lib/utils";
 import type { AnswerItem, JobStatus, TimelineEvent } from "@/lib/types";
-import type { SaveState } from "@/lib/hooks/useAgentSession";
+import type { DeployState, SaveState } from "@/lib/hooks/useAgentSession";
 
 // lucide-react dropped brand marks, so the GitHub logo is inlined here.
 function GithubIcon(props: React.SVGProps<SVGSVGElement>) {
@@ -61,6 +62,13 @@ const SAVE_STATUS_TEXT: Record<Exclude<SaveState, "idle">, (message: string | nu
   done: (_message, url) => (url ? `Saved to GitHub: ${url}` : "Saved to GitHub."),
   error: (message) => message ?? "Failed to save to GitHub.",
   not_configured: (message) => message ?? "GitHub is not configured in this environment.",
+};
+
+const DEPLOY_STATUS_TEXT: Record<Exclude<DeployState, "idle">, (message: string | null, url: string | null) => string> = {
+  deploying: () => "Deploying to Vercel…",
+  done: (_message, url) => (url ? `Deployed: ${url}` : "Deployed."),
+  error: (message) => message ?? "Failed to deploy to Vercel.",
+  not_configured: (message) => message ?? "Vercel deploy is not configured in this environment.",
 };
 
 const STATUS_STRIP_CONFIG: Record<
@@ -113,12 +121,16 @@ export function ChatPanel({
   saveState = "idle",
   saveMessage = null,
   saveUrl = null,
+  deployState = "idle",
+  deployMessage = null,
+  deployUrl = null,
   onSubmitPrompt,
   onAnswerQuestion,
   onStop,
   onContinueChat,
   onFork,
   onSave,
+  onDeploy,
 }: {
   events: TimelineEvent[];
   jobStatus: JobStatus | null;
@@ -131,12 +143,16 @@ export function ChatPanel({
   saveState?: SaveState;
   saveMessage?: string | null;
   saveUrl?: string | null;
+  deployState?: DeployState;
+  deployMessage?: string | null;
+  deployUrl?: string | null;
   onSubmitPrompt: (prompt: string) => void;
   onAnswerQuestion: (toolUseId: string, answers: AnswerItem[]) => void;
   onStop: () => void;
   onContinueChat?: (prompt: string) => void;
   onFork?: () => void;
   onSave?: () => void;
+  onDeploy?: () => void;
 }) {
   const [message, setMessage] = useState("");
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -228,6 +244,21 @@ export function ChatPanel({
           </div>
         )}
 
+        {deployState !== "idle" && (
+          <div
+            className={cn(
+              "mb-2 rounded-md px-2.5 py-1.5 text-xs",
+              deployState === "error"
+                ? "bg-red-500/10 text-red-400"
+                : deployState === "not_configured"
+                  ? "bg-secondary/60 text-muted-foreground"
+                  : "bg-emerald-500/10 text-emerald-400"
+            )}
+          >
+            {DEPLOY_STATUS_TEXT[deployState](deployMessage, deployUrl)}
+          </div>
+        )}
+
         <div className="rounded-lg border border-input bg-input/20 p-2 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50">
           <Textarea
             value={message}
@@ -257,6 +288,12 @@ export function ChatPanel({
                 label="Fork"
                 onClick={onFork}
                 disabled={!hasProject || !onFork || isForking}
+              />
+              <IconAction
+                icon={<Rocket className="size-4" />}
+                label="Deploy"
+                onClick={onDeploy}
+                disabled={!hasProject || !onDeploy || deployState === "deploying"}
               />
               <IconAction icon={<Mic className="size-4" />} label="Voice input" />
             </div>

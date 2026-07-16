@@ -5,6 +5,7 @@ import { DEV_USER } from "@/lib/dev-user";
 import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
 import type { JobStatus } from "@/lib/types";
 import { appendEvent } from "@/server/events";
+import { ensureSignupBonus } from "@/server/credits";
 import { isUniqueViolation } from "@/server/db-utils";
 import { makeProjectSlug } from "@/server/slug";
 import { runAgentLoop } from "@/server/agent";
@@ -56,6 +57,9 @@ export async function createProjectAndJob(prompt: string) {
     await ensureDevUser();
     owner = DEV_USER;
   }
+  // Phase 4: idempotent — only actually grants credits the first time this
+  // user is seen (see src/server/credits.ts's ensureSignupBonus).
+  await ensureSignupBonus(owner.id);
 
   const trimmed = prompt.trim();
   if (!trimmed) {

@@ -13,6 +13,7 @@ import { appendEvent, getAllEvents, type EventRow } from "@/server/events";
 import { getJob, setAgentSessionId, setJobStatus } from "@/server/jobs";
 import { sandboxProvider, seedSandboxTemplate } from "@/server/sandbox";
 import { snapshotSessionFiles } from "@/server/files";
+import { debitForJobUsage } from "@/server/credits";
 import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -147,6 +148,52 @@ function sleep(ms: number) {
 
 function isMockMode(): boolean {
   return process.env.MOCK_AGENT === "1";
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 (Half A, REAL): production credential swap point.
+//
+// Returns `undefined` when ANTHROPIC_API_KEY is not set in the server's own
+// process environment — the SDK's `query()` then omits `options.env`
+// entirely, so the subprocess inherits this process's shell environment and
+// falls through to the local `claude` CLI's own login (Claude Code
+// subscription auth). This is the default, always-tested path in this
+// environment and MUST behave identically to Phase 1-3: no ANTHROPIC_API_KEY
+// is set here, so every call site below passes `env: getAgentEnv()` ===
+// `env: undefined`, which is exactly what those call sites did before this
+// function existed (they simply didn't set `env` at all).
+//
+// Returns `{ ...process.env, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }`
+// only once a real, centrally-held key is configured for a production
+// deploy — see PLAN.md's Phase 4 section. No other code changes are needed
+// to swap credential sources: this is the one function a production
+// deployment's ops config needs to make true.
+// ---------------------------------------------------------------------------
+function getAgentEnv(): Record<string, string | undefined> | undefined {
+  if (!process.env.ANTHROPIC_API_KEY) return undefined;
+  return { ...process.env, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY };
+}
+
+/**
+ * Appends a `usage` event (unchanged shape from Phase 1) and, right after,
+ * debits the job owner's credit ledger for that usage — see
+ * src/server/credits.ts for the cost model. Centralizes the three call
+ * sites below so scoping/summary/build queries can't drift out of sync with
+ * each other.
+ */
+async function recordUsage(
+  jobId: string,
+  step: string,
+  inputTokens: number,
+  outputTokens: number
+): Promise<void> {
+  await appendEvent(jobId, "system", "usage", {
+    model: MODEL,
+    inputTokens,
+    outputTokens,
+    step,
+  });
+  await debitForJobUsage(jobId, step, inputTokens, outputTokens);
 }
 
 // Prevents a duplicate concurrent run of the same job within this process
@@ -387,6 +434,7 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
     options: {
       model: MODEL,
       cwd,
+      env: getAgentEnv(),
       systemPrompt: SYSTEM_PROMPT,
       maxTurns: MAX_ITERATIONS,
       tools: [], // no built-in tools at all (no Bash/Read/Write/Edit/WebFetch/...)
@@ -434,12 +482,12 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
 
     if (message.type === "result") {
       sessionId = message.session_id;
-      await appendEvent(jobId, "system", "usage", {
-        model: MODEL,
-        inputTokens: message.usage.input_tokens,
-        outputTokens: message.usage.output_tokens,
-        step: "scoping_query",
-      });
+      await recordUsage(
+        jobId,
+        "scoping_query",
+        message.usage.input_tokens,
+        message.usage.output_tokens
+      );
 
       if (message.subtype !== "success") {
         await appendEvent(jobId, "system", "error", {
@@ -494,6 +542,7 @@ async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
     options: {
       model: MODEL,
       cwd,
+      env: getAgentEnv(),
       systemPrompt: SYSTEM_PROMPT,
       maxTurns: 1,
       tools: [],
@@ -518,12 +567,12 @@ async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
     }
 
     if (message.type === "result") {
-      await appendEvent(jobId, "system", "usage", {
-        model: MODEL,
-        inputTokens: message.usage.input_tokens,
-        outputTokens: message.usage.output_tokens,
-        step: "summary_query",
-      });
+      await recordUsage(
+        jobId,
+        "summary_query",
+        message.usage.input_tokens,
+        message.usage.output_tokens
+      );
       if (message.subtype !== "success") {
         throw new Error(describeResultError(message));
       }
@@ -646,6 +695,7 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
     options: {
       model: MODEL,
       cwd,
+      env: getAgentEnv(),
       systemPrompt: BUILD_SYSTEM_PROMPT,
       maxTurns: BUILD_MAX_ITERATIONS,
       tools: BUILD_TOOLS,
@@ -708,12 +758,12 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
 
     if (message.type === "result") {
       sessionId = message.session_id;
-      await appendEvent(jobId, "system", "usage", {
-        model: MODEL,
-        inputTokens: message.usage.input_tokens,
-        outputTokens: message.usage.output_tokens,
-        step: "build_query",
-      });
+      await recordUsage(
+        jobId,
+        "build_query",
+        message.usage.input_tokens,
+        message.usage.output_tokens
+      );
 
       if (message.subtype !== "success") {
         throw new Error(describeResultError(message));

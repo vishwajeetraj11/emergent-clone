@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" ADD COLUMN "vercel_deployment_url" text;
