@@ -7,6 +7,7 @@ import {
   jsonb,
   timestamp,
   pgEnum,
+  uniqueIndex,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
@@ -100,35 +101,46 @@ export const jobs = pgTable("jobs", {
 // events — append-only trajectory log, source of truth for SSE stream
 // ---------------------------------------------------------------------------
 
-export const events = pgTable("events", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  jobId: uuid("job_id")
-    .notNull()
-    .references(() => jobs.id, { onDelete: "cascade" }),
-  seq: integer("seq").notNull(),
-  role: varchar("role", { length: 32 }).notNull(),
-  type: varchar("type", { length: 64 }).notNull(),
-  payload: jsonb("payload").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const events = pgTable(
+  "events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    // Monotonic per-job cursor: the SSE stream orders by it and Last-Event-ID
+    // resume seeks past it, so duplicates would corrupt both.
+    seq: integer("seq").notNull(),
+    role: varchar("role", { length: 32 }).notNull(),
+    type: varchar("type", { length: 64 }).notNull(),
+    payload: jsonb("payload").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [uniqueIndex("events_job_id_seq_idx").on(t.jobId, t.seq)]
+);
 
 // ---------------------------------------------------------------------------
 // files — latest snapshot per session (file viewer + GitHub export)
 // ---------------------------------------------------------------------------
 
-export const files = pgTable("files", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  sessionId: uuid("session_id")
-    .notNull()
-    .references(() => sessions.id, { onDelete: "cascade" }),
-  path: text("path").notNull(),
-  content: text("content").notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const files = pgTable(
+  "files",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    content: text("content").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  // One row per path per session — file writes are upserts on this key.
+  (t) => [uniqueIndex("files_session_id_path_idx").on(t.sessionId, t.path)]
+);
 
 // ---------------------------------------------------------------------------
 // credit_ledger — per-token usage accounting

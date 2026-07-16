@@ -1,5 +1,5 @@
 {
-  "id": "107af9b7-1292-440e-ba0c-6aeced714651",
+  "id": "3f5b55be-edb4-44fe-a5ae-ab628a9cea60",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -131,7 +131,29 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "events_job_id_seq_idx": {
+          "name": "events_job_id_seq_idx",
+          "columns": [
+            {
+              "expression": "job_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "events_job_id_jobs_id_fk": {
           "name": "events_job_id_jobs_id_fk",
@@ -190,7 +212,29 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "files_session_id_path_idx": {
+          "name": "files_session_id_path_idx",
+          "columns": [
+            {
+              "expression": "session_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "path",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "files_session_id_sessions_id_fk": {
           "name": "files_session_id_sessions_id_fk",

@@ -29,7 +29,7 @@ Grounded in the screen recording (2026-04-28) of the real dashboard:
 | Web app | Next.js (App Router) + Tailwind + shadcn/ui, dark theme |
 | Agent loop | Claude API via Claude Agent SDK — planner/builder loop with tools: `write_file`, `run_command`, `read_file`, `ask_user`, `spawn_subagent` (Design Agent) |
 | Code execution / preview | One `SandboxProvider` interface with a single implementation to start: Vercel Sandbox (Firecracker microVMs) — one sandbox per active session, exposes a preview URL for the iframe. A Docker implementation only if Vercel Sandbox proves limiting; never maintain both in parallel during MVP |
-| Streaming | SSE endpoint `GET /api/jobs/:id/stream` emitting trajectory events (message, tool_call, file_written, status, question) — mirrors Emergent's `stream?job_id`. Client sends last event cursor (`Last-Event-ID` = `events.id`) so reconnects resume, since the append-only `events` table is the source of truth |
+| Streaming | SSE endpoint `GET /api/jobs/:id/stream` emitting trajectory events (message, tool_call, file_written, status, question) — mirrors Emergent's `stream?job_id`. Client sends last event cursor (`Last-Event-ID` = job-scoped `events.seq`) so reconnects resume, since the append-only `events` table is the source of truth |
 | DB | Postgres (Neon via Vercel Marketplace, or local Postgres in dev) — users, projects, sessions, trajectory events, file snapshots, forks, credit ledger |
 | Auth | Clerk — added in Phase 3. Until then the app runs single-user dev mode (hardcoded user row) so the core loop is never blocked on credentials |
 | GitHub export | GitHub App + octokit: create repo, push sandbox filesystem |
