@@ -1,68 +1,62 @@
-import Anthropic from "@anthropic-ai/sdk";
-import type {
-  ContentBlockParam,
-  MessageParam,
-  Tool,
-} from "@anthropic-ai/sdk/resources/messages";
+import { mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import {
+  createSdkMcpServer,
+  query,
+  tool,
+  type SDKResultError,
+} from "@anthropic-ai/claude-agent-sdk";
 import { appendEvent, getAllEvents, type EventRow } from "@/server/events";
-import { getJob, setJobStatus } from "@/server/jobs";
+import { getJob, setAgentSessionId, setJobStatus } from "@/server/jobs";
 import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Phase 1 agent loop.
 //
-// First turn: force the model to call `ask_user` with 3-5 clarifying
-// questions. Once the user answers, the model writes a short build plan as
-// text; the harness (not the model) then emits a few whimsical status lines
-// and a closing summary, and marks the job done.
+// First turn: the model is instructed (and given exactly one tool) to call
+// `ask_user` with 3-5 clarifying questions. Once the user answers, the model
+// writes a short build plan as text; the harness (not the model) then emits
+// a few whimsical status lines and a closing summary, and marks the job
+// done.
 //
 // Real code-gen tools (write_file/run_command/sandbox) are out of scope for
 // Phase 1 — see PLAN.md Phase 2.
 //
-// MOCK MODE: if ANTHROPIC_API_KEY is unset, or MOCK_AGENT=1, we run a
-// scripted trajectory with identical event shapes so the whole system is
-// verifiable without an API key.
+// REAL RUNTIME: the "real" (non-mock) path runs on the Claude Agent SDK
+// (`@anthropic-ai/claude-agent-sdk`), which wraps the local `claude` CLI and
+// authenticates with whatever the CLI is already logged in as (Claude Code
+// subscription auth) — no ANTHROPIC_API_KEY needed for local dev. Deploying
+// this to a hosted environment later needs its own auth story for the CLI;
+// that's out of scope here.
+//
+// The `ask_user` tool is a custom in-process SDK MCP tool: when the model
+// calls it, the handler appends the tool_call + question events, flips the
+// job to waiting_on_user, and then BLOCKS — polling the events table for an
+// `answer` event — until the user responds via POST /messages. This means
+// the entire scoping conversation (ask_user -> plan text) happens inside one
+// long-lived query() call per job, spanning the human's wait. That call
+// only lives in this process, so if the dev server restarts mid-run the job
+// orphans — same accepted Phase 1 limitation documented in src/server/jobs.ts.
+//
+// MOCK MODE: if MOCK_AGENT=1, we run a scripted trajectory with identical
+// event shapes so the whole system is verifiable without any model calls at
+// all.
 // ---------------------------------------------------------------------------
 
 const MODEL = "claude-sonnet-5";
 const MAX_ITERATIONS = 15;
+const ANSWER_POLL_INTERVAL_MS = 800;
 
 const SYSTEM_PROMPT = `You are the build agent inside an Emergent-style AI app builder. A user just described an app they want built in a chat box.
 
-Your job in this phase is ONLY to scope the work — you do not write or run any code yet (that capability arrives in a later phase).
+Your job in this phase is ONLY to scope the work — you do not write or run any code yet (that capability arrives in a later phase). You have exactly one tool available, named ask_user; you have no filesystem, shell, or web access.
 
-On your very first turn you MUST call the ask_user tool with 3-5 short clarifying questions about the app (e.g. target platform, data model, auth, must-have features, design style). Give each question 2-5 concrete suggested options.
+On your very first turn you MUST call the ask_user tool with 3-5 short clarifying questions about the app (e.g. target platform, data model, auth, must-have features, design style). Give each question 2-6 concrete suggested options.
 
 After the user answers, write a short build plan (4-8 concise bullet points, plain text, no code) summarizing what you will build, directly informed by their answers.`;
-
-const ASK_USER_TOOL: Tool = {
-  name: "ask_user",
-  description:
-    "Ask the user 3-5 clarifying questions about the app they want built, each with a few suggested options. Call this exactly once, on your first turn, before doing anything else.",
-  input_schema: {
-    type: "object",
-    properties: {
-      questions: {
-        type: "array",
-        minItems: 3,
-        maxItems: 5,
-        items: {
-          type: "object",
-          properties: {
-            question: { type: "string" },
-            options: {
-              type: "array",
-              items: { type: "string" },
-              description: "2-5 short suggested answers",
-            },
-          },
-          required: ["question", "options"],
-        },
-      },
-    },
-    required: ["questions"],
-  },
-};
 
 const WHIMSICAL_STATUS_LINES = [
   "Making things click…",
@@ -115,7 +109,7 @@ function sleep(ms: number) {
 }
 
 function isMockMode(): boolean {
-  return !process.env.ANTHROPIC_API_KEY || process.env.MOCK_AGENT === "1";
+  return process.env.MOCK_AGENT === "1";
 }
 
 // Prevents a duplicate concurrent run of the same job within this process
@@ -154,31 +148,6 @@ function countUnansweredQuestions(allEvents: EventRow[]): number {
       e.type === "question" &&
       !answeredIds.has((e.payload as { toolUseId?: string }).toolUseId ?? "")
   ).length;
-}
-
-function countModelSteps(allEvents: EventRow[]): number {
-  const stepIds = new Set<string>();
-  for (const ev of allEvents) {
-    if (ev.type === "assistant_message" || ev.type === "tool_call") {
-      const stepId = (ev.payload as { stepId?: string }).stepId;
-      if (stepId) stepIds.add(stepId);
-    }
-  }
-  return stepIds.size;
-}
-
-async function guardIterationCap(
-  jobId: string,
-  allEvents: EventRow[]
-): Promise<boolean> {
-  if (countModelSteps(allEvents) >= MAX_ITERATIONS) {
-    await appendEvent(jobId, "system", "error", {
-      message: `Reached the maximum of ${MAX_ITERATIONS} agent iterations for this job.`,
-    });
-    await setJobStatus(jobId, "failed");
-    return true;
-  }
-  return false;
 }
 
 async function handleAgentError(jobId: string, err: unknown) {
@@ -239,7 +208,7 @@ async function runMockLoop(jobId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Real trajectory (Anthropic API)
+// Real trajectory (Claude Agent SDK, local `claude` CLI auth)
 // ---------------------------------------------------------------------------
 
 function normalizeQuestions(raw: unknown): Question[] {
@@ -259,190 +228,197 @@ function formatAnswersAsToolResult(answers: AnswerItem[]): string {
   return answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n");
 }
 
+/** Per-job scratch directory used as the query's `cwd` — never the real project root. */
+function ensureJobScratchDir(jobId: string): string {
+  const dir = join(tmpdir(), "emergent-agent-jobs", jobId);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 /**
- * Reconstructs the Anthropic message history from the job's event log so the
- * conversation can be resumed after a suspend (waiting_on_user) even if this
- * process restarted in between. assistant_message/tool_call events sharing a
- * stepId are grouped back into the single assistant turn they came from.
+ * Polls the events table (same ~800ms polling style as the SSE route) until
+ * an `answer` event for this toolUseId appears, or the job is stopped out
+ * from under us. Runs *inside* the ask_user tool handler, so the SDK's
+ * query() call — and the underlying `claude` CLI process — stays alive for
+ * the whole wait.
  */
-function buildMessagesFromEvents(allEvents: EventRow[]): MessageParam[] {
-  const messages: MessageParam[] = [];
-  let currentStepId: string | null = null;
-  let currentBlocks: ContentBlockParam[] = [];
+async function waitForAnswer(
+  jobId: string,
+  toolUseId: string
+): Promise<AnswerItem[] | null> {
+  while (true) {
+    if (await isStopped(jobId)) return null;
 
-  function flush() {
-    if (currentBlocks.length) {
-      messages.push({ role: "assistant", content: currentBlocks });
+    const allEvents = await getAllEvents(jobId);
+    const answerEvent = allEvents.find(
+      (e) =>
+        e.type === "answer" &&
+        (e.payload as { toolUseId?: string }).toolUseId === toolUseId
+    );
+    if (answerEvent) {
+      return (answerEvent.payload as { answers?: AnswerItem[] }).answers ?? [];
     }
-    currentStepId = null;
-    currentBlocks = [];
+
+    await sleep(ANSWER_POLL_INTERVAL_MS);
   }
+}
 
-  for (const ev of allEvents) {
-    if (ev.type === "user_message") {
-      flush();
-      messages.push({
-        role: "user",
-        content: (ev.payload as { text?: string }).text ?? "",
+function buildAskUserTool(jobId: string) {
+  return tool(
+    "ask_user",
+    "Ask the user 3-5 clarifying questions about the app they want built, each with 2-6 short suggested options. Call this exactly once, on your first turn, before writing any plan or doing anything else.",
+    {
+      questions: z
+        .array(
+          z.object({
+            question: z.string().min(1),
+            options: z.array(z.string().min(1)).min(2).max(6),
+          })
+        )
+        .min(3)
+        .max(5)
+        .describe("3-5 clarifying questions, each with 2-6 short suggested options"),
+    },
+    async (args) => {
+      const toolUseId = randomUUID();
+      const questions = normalizeQuestions(args.questions);
+
+      await appendEvent(jobId, "assistant", "tool_call", {
+        id: toolUseId,
+        name: "ask_user",
+        input: { questions },
       });
-      continue;
-    }
-
-    if (ev.type === "answer") {
-      flush();
-      const payload = ev.payload as { toolUseId?: string; answers?: AnswerItem[] };
-      if (!payload.toolUseId) continue;
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: payload.toolUseId,
-            content: formatAnswersAsToolResult(payload.answers ?? []),
-          },
-        ],
+      await appendEvent(jobId, "assistant", "question", {
+        toolUseId,
+        questions,
       });
-      continue;
-    }
+      await setJobStatus(jobId, "waiting_on_user");
 
-    if (ev.type === "assistant_message" || ev.type === "tool_call") {
-      const stepId = (ev.payload as { stepId?: string }).stepId ?? `solo-${ev.seq}`;
-      if (stepId !== currentStepId) {
-        flush();
-        currentStepId = stepId;
+      const answers = await waitForAnswer(jobId, toolUseId);
+
+      if (answers === null) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "The job was stopped before the user answered.",
+            },
+          ],
+          isError: true,
+        };
       }
-      if (ev.type === "assistant_message") {
-        currentBlocks.push({
-          type: "text",
-          text: (ev.payload as { text?: string }).text ?? "",
-        });
-      } else {
-        const payload = ev.payload as { id?: string; name?: string; input?: unknown };
-        if (payload.id && payload.name) {
-          currentBlocks.push({
-            type: "tool_use",
-            id: payload.id,
-            name: payload.name,
-            input: (payload.input as Record<string, unknown>) ?? {},
+
+      return {
+        content: [
+          { type: "text" as const, text: formatAnswersAsToolResult(answers) },
+        ],
+      };
+    }
+  );
+}
+
+function describeResultError(message: SDKResultError): string {
+  if (message.subtype === "error_max_turns") {
+    return `Reached the maximum of ${MAX_ITERATIONS} agent iterations for this job.`;
+  }
+  if (message.subtype === "error_max_budget_usd") {
+    return "Reached the maximum budget for this job.";
+  }
+  if (message.errors.length > 0) {
+    return message.errors.join("; ");
+  }
+  return `Agent run failed (${message.subtype}).`;
+}
+
+/**
+ * The whole scoping conversation — ask_user, the block-until-answered wait,
+ * and the resulting plan text — happens inside this single query() call.
+ * Only the `ask_user` MCP tool is exposed; every built-in tool
+ * (Bash/Read/Write/Edit/WebFetch/…) is disabled via `tools: []`, and `cwd`
+ * points at a throwaway scratch directory as defense in depth.
+ */
+async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
+  const cwd = ensureJobScratchDir(jobId);
+  const emergentServer = createSdkMcpServer({
+    name: "emergent",
+    version: "1.0.0",
+    tools: [buildAskUserTool(jobId)],
+  });
+
+  const q = query({
+    prompt,
+    options: {
+      model: MODEL,
+      cwd,
+      systemPrompt: SYSTEM_PROMPT,
+      maxTurns: MAX_ITERATIONS,
+      tools: [], // no built-in tools at all (no Bash/Read/Write/Edit/WebFetch/...)
+      mcpServers: { emergent: emergentServer },
+      allowedTools: ["mcp__emergent__ask_user"], // the ONLY tool the model can use
+      strictMcpConfig: true, // ignore project .mcp.json / other MCP config
+      settingSources: [], // ignore filesystem settings (user/project/local)
+      permissionMode: "default",
+    },
+  });
+
+  let askUserCalled = false;
+  let sessionId: string | undefined;
+
+  for await (const message of q) {
+    if (await isStopped(jobId)) {
+      q.close();
+      return;
+    }
+
+    if (message.type === "assistant") {
+      let blockIndex = 0;
+      for (const block of message.message.content) {
+        if (block.type === "text" && block.text.trim()) {
+          await appendEvent(jobId, "assistant", "assistant_message", {
+            text: block.text,
+            stepId: message.uuid,
+            blockIndex: blockIndex++,
           });
+        } else if (block.type === "tool_use") {
+          // The ask_user tool_call/question events are appended by the tool
+          // handler itself (buildAskUserTool) — nothing to do here besides
+          // note that the model did in fact call it.
+          askUserCalled = true;
+          blockIndex++;
         }
       }
       continue;
     }
-    // status / usage / error events are cosmetic and not part of the model conversation.
-  }
 
-  flush();
-  return messages;
-}
-
-async function logUsage(jobId: string, response: Anthropic.Message, step: string) {
-  await appendEvent(jobId, "system", "usage", {
-    model: response.model,
-    inputTokens: response.usage.input_tokens,
-    outputTokens: response.usage.output_tokens,
-    step,
-  });
-}
-
-async function askUserTurn(client: Anthropic, jobId: string, allEvents: EventRow[]) {
-  const messages = buildMessagesFromEvents(allEvents);
-
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2048,
-    system: SYSTEM_PROMPT,
-    thinking: { type: "disabled" },
-    tools: [ASK_USER_TOOL],
-    tool_choice: { type: "tool", name: "ask_user" },
-    messages,
-  });
-  await logUsage(jobId, response, "ask_user_turn");
-
-  const toolUse = response.content.find((b) => b.type === "tool_use");
-  if (!toolUse || toolUse.type !== "tool_use" || toolUse.name !== "ask_user") {
-    await appendEvent(jobId, "system", "error", {
-      message: "Agent did not call ask_user on its first turn.",
-    });
-    await setJobStatus(jobId, "failed");
-    return;
-  }
-
-  const stepId = response.id;
-  await appendEvent(jobId, "assistant", "tool_call", {
-    id: toolUse.id,
-    name: toolUse.name,
-    input: toolUse.input,
-    stepId,
-    blockIndex: 0,
-  });
-
-  const questions = normalizeQuestions(
-    (toolUse.input as { questions?: unknown }).questions
-  );
-  await appendEvent(jobId, "assistant", "question", {
-    toolUseId: toolUse.id,
-    questions,
-  });
-
-  await setJobStatus(jobId, "waiting_on_user");
-}
-
-async function planAndFinish(client: Anthropic, jobId: string) {
-  if (await isStopped(jobId)) return;
-
-  const messages = buildMessagesFromEvents(await getAllEvents(jobId));
-
-  const planResponse = await client.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    thinking: { type: "disabled" },
-    tools: [ASK_USER_TOOL],
-    messages,
-  });
-  await logUsage(jobId, planResponse, "plan_turn");
-
-  const planStepId = planResponse.id;
-  let blockIndex = 0;
-  let sawText = false;
-
-  for (const block of planResponse.content) {
-    if (block.type === "text") {
-      sawText = true;
-      await appendEvent(jobId, "assistant", "assistant_message", {
-        text: block.text,
-        stepId: planStepId,
-        blockIndex: blockIndex++,
+    if (message.type === "result") {
+      sessionId = message.session_id;
+      await appendEvent(jobId, "system", "usage", {
+        model: MODEL,
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+        step: "scoping_query",
       });
-    } else if (block.type === "tool_use") {
-      // Model asked another clarifying round instead of planning — handle it
-      // like a second ask_user turn rather than failing the job.
-      await appendEvent(jobId, "assistant", "tool_call", {
-        id: block.id,
-        name: block.name,
-        input: block.input,
-        stepId: planStepId,
-        blockIndex: blockIndex++,
-      });
-      if (block.name === "ask_user") {
-        const questions = normalizeQuestions(
-          (block.input as { questions?: unknown }).questions
-        );
-        await appendEvent(jobId, "assistant", "question", {
-          toolUseId: block.id,
-          questions,
+
+      if (message.subtype !== "success") {
+        await appendEvent(jobId, "system", "error", {
+          message: describeResultError(message),
         });
-        await setJobStatus(jobId, "waiting_on_user");
+        await setJobStatus(jobId, "failed");
+        if (sessionId) await setAgentSessionId(jobId, sessionId);
         return;
       }
     }
   }
 
-  if (!sawText) {
+  if (sessionId) await setAgentSessionId(jobId, sessionId);
+  if (await isStopped(jobId)) return;
+
+  if (!askUserCalled) {
     await appendEvent(jobId, "system", "error", {
-      message: "Agent produced no plan text.",
+      message: "Agent did not call ask_user during the scoping turn.",
     });
+    await setJobStatus(jobId, "failed");
+    return;
   }
 
   // Whimsical status effects are scripted by the harness (not the model) —
@@ -455,34 +431,61 @@ async function planAndFinish(client: Anthropic, jobId: string) {
 
   if (await isStopped(jobId)) return;
 
-  const summaryMessages: MessageParam[] = [
-    ...buildMessagesFromEvents(await getAllEvents(jobId)),
-    {
-      role: "user",
-      content:
-        "The scoping phase is complete. Write a brief (2-3 sentence) closing summary for the user of what you'll build next.",
+  await runSummaryQuery(jobId, cwd);
+}
+
+/**
+ * Second, short query() call for the closing summary — same tool-restricted,
+ * filesystem-isolated configuration as the scoping query, but with no tools
+ * at all (not even ask_user).
+ */
+async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
+  const q = query({
+    prompt:
+      "The scoping phase is complete. Write a brief (2-3 sentence) closing summary for the user of what you'll build next. Plain text only — no code, no tool calls.",
+    options: {
+      model: MODEL,
+      cwd,
+      systemPrompt: SYSTEM_PROMPT,
+      maxTurns: 1,
+      tools: [],
+      mcpServers: {},
+      allowedTools: [],
+      strictMcpConfig: true,
+      settingSources: [],
+      permissionMode: "default",
     },
-  ];
-
-  const summaryResponse = await client.messages.create({
-    model: MODEL,
-    max_tokens: 512,
-    system: SYSTEM_PROMPT,
-    thinking: { type: "disabled" },
-    messages: summaryMessages,
   });
-  await logUsage(jobId, summaryResponse, "summary_turn");
 
-  const summaryText = summaryResponse.content
-    .filter((b) => b.type === "text")
-    .map((b) => (b.type === "text" ? b.text : ""))
-    .join("\n")
-    .trim();
+  let summaryText = "";
+
+  for await (const message of q) {
+    if (message.type === "assistant") {
+      for (const block of message.message.content) {
+        if (block.type === "text" && block.text.trim()) {
+          summaryText += (summaryText ? "\n" : "") + block.text;
+        }
+      }
+      continue;
+    }
+
+    if (message.type === "result") {
+      await appendEvent(jobId, "system", "usage", {
+        model: MODEL,
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+        step: "summary_query",
+      });
+      if (message.subtype !== "success") {
+        throw new Error(describeResultError(message));
+      }
+    }
+  }
+
+  if (await isStopped(jobId)) return;
 
   await appendEvent(jobId, "assistant", "assistant_message", {
-    text: summaryText || "Scoping complete — ready for the next phase.",
-    stepId: summaryResponse.id,
-    blockIndex: 0,
+    text: summaryText.trim() || "Scoping complete — ready for the next phase.",
   });
 
   await setJobStatus(jobId, "done");
@@ -490,29 +493,33 @@ async function planAndFinish(client: Anthropic, jobId: string) {
 
 async function runRealLoop(jobId: string): Promise<void> {
   try {
-    const client = new Anthropic();
-    const allEvents = await getAllEvents(jobId);
-
-    if (await guardIterationCap(jobId, allEvents)) return;
     if (await isStopped(jobId)) return;
 
-    const hasAskUserCall = allEvents.some(
-      (e) =>
-        e.type === "tool_call" &&
-        (e.payload as { name?: string }).name === "ask_user"
-    );
+    const allEvents = await getAllEvents(jobId);
 
-    if (!hasAskUserCall) {
-      await askUserTurn(client, jobId, allEvents);
-      return;
+    // The scoping phase runs start-to-finish inside one long-lived query()
+    // call (see runScopingQuery) — the ask_user tool blocks *inside that
+    // call* until answered, so a second invocation of runAgentLoop for the
+    // same job (e.g. the resume POST from /messages while the first call is
+    // still parked in the tool handler) is naturally a no-op: the
+    // in-process `runningJobs` guard in runAgentLoop already prevents real
+    // re-entrancy. This check instead guards the orphan case — dev server
+    // restarted mid-run, so `runningJobs` is empty in the new process too —
+    // where a prior ask_user tool_call is already on the log. Resuming the
+    // underlying CLI session across a process restart is out of scope for
+    // this phase (see the Phase 1 limitation note in src/server/jobs.ts).
+    const alreadyStartedScoping = allEvents.some(
+      (e) => e.type === "tool_call" && (e.payload as { name?: string }).name === "ask_user"
+    );
+    if (alreadyStartedScoping) return;
+
+    const userMessageEvent = allEvents.find((e) => e.type === "user_message");
+    const prompt = (userMessageEvent?.payload as { text?: string } | undefined)?.text;
+    if (!prompt) {
+      throw new Error("Job has no initial user message to build a prompt from.");
     }
 
-    if (countUnansweredQuestions(allEvents) > 0) return; // still waiting
-
-    const hasPlan = allEvents.some((e) => e.type === "assistant_message");
-    if (hasPlan) return; // plan (and likely everything else) already produced
-
-    await planAndFinish(client, jobId);
+    await runScopingQuery(jobId, prompt);
   } catch (err) {
     await handleAgentError(jobId, err);
   }

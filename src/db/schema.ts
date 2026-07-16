@@ -89,6 +89,10 @@ export const jobs = pgTable("jobs", {
     .notNull()
     .references(() => sessions.id, { onDelete: "cascade" }),
   status: jobStatusEnum("status").notNull().default("running"),
+  // Claude Agent SDK session id for this job's main query() call, so a later
+  // phase can resume it. Nullable: mock-mode jobs and jobs that never made
+  // it past the first turn never populate this.
+  agentSessionId: text("agent_session_id"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

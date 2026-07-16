@@ -1,0 +1,1 @@
+ALTER TABLE "jobs" ADD COLUMN "agent_session_id" text;

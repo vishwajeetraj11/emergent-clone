@@ -107,3 +107,21 @@ export async function setJobStatus(
     .returning();
   return job ?? null;
 }
+
+/**
+ * Persists the Claude Agent SDK session id for a job's main (scoping) query
+ * so a later phase can resume it. Phase 1 only stores this — it does not
+ * implement resuming a query() from a new process.
+ */
+export async function setAgentSessionId(
+  jobId: string,
+  agentSessionId: string
+): Promise<JobRow | null> {
+  const db = getDb();
+  const [job] = await db
+    .update(jobs)
+    .set({ agentSessionId, updatedAt: new Date() })
+    .where(eq(jobs.id, jobId))
+    .returning();
+  return job ?? null;
+}

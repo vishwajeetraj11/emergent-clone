@@ -8,6 +8,13 @@
       "when": 1784224602590,
       "tag": "0000_gifted_dragon_lord",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784227549242,
+      "tag": "0001_romantic_eternity",
+      "breakpoints": true
     }
   ]
 }

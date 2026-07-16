@@ -27,7 +27,7 @@ Grounded in the screen recording (2026-04-28) of the real dashboard:
 | Concern | Choice |
 |---|---|
 | Web app | Next.js (App Router) + Tailwind + shadcn/ui, dark theme |
-| Agent loop | Claude API via Claude Agent SDK — planner/builder loop with tools: `write_file`, `run_command`, `read_file`, `ask_user`, `spawn_subagent` (Design Agent) |
+| Agent loop | **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`, wraps the local `claude` CLI) — runs against the operator's Claude Code subscription auth, no `ANTHROPIC_API_KEY` needed for local dev. Custom `ask_user` tool via an in-process SDK MCP server; Phase 2's file-write/run-command tools are the SDK's built-in Read/Write/Edit/Bash, gated per phase via `allowedTools`. Deploying this to a hosted environment later needs its own auth story (API key or provisioned CLI credentials) — local dev doesn't. `MOCK_AGENT=1` remains the scripted fallback |
 | Code execution / preview | One `SandboxProvider` interface with a single implementation to start: Vercel Sandbox (Firecracker microVMs) — one sandbox per active session, exposes a preview URL for the iframe. A Docker implementation only if Vercel Sandbox proves limiting; never maintain both in parallel during MVP |
 | Streaming | SSE endpoint `GET /api/jobs/:id/stream` emitting trajectory events (message, tool_call, file_written, status, question) — mirrors Emergent's `stream?job_id`. Client sends last event cursor (`Last-Event-ID` = job-scoped `events.seq`) so reconnects resume, since the append-only `events` table is the source of truth |
 | DB | Postgres (Neon via Vercel Marketplace, or local Postgres in dev) — users, projects, sessions, trajectory events, file snapshots, forks, credit ledger |
