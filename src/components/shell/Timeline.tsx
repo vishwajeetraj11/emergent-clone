@@ -2,6 +2,7 @@
 
 import { QuestionCard } from "@/components/shell/QuestionCard";
 import { FilesChangedCard } from "@/components/shell/FilesChangedCard";
+import { Markdown } from "@/components/shell/Markdown";
 import type { AnswerItem, Question, TimelineEvent } from "@/lib/types";
 
 function findAnswerFor(
@@ -45,14 +46,7 @@ export function Timeline({
           }
           case "assistant_message": {
             const text = (event.payload as { text?: string }).text ?? "";
-            return (
-              <p
-                key={event.seq}
-                className="whitespace-pre-wrap text-sm leading-relaxed text-foreground"
-              >
-                {text}
-              </p>
-            );
+            return <Markdown key={event.seq} text={text} />;
           }
           case "status": {
             const text = (event.payload as { text?: string }).text ?? "";
