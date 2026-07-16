@@ -658,7 +658,17 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
       // genuinely needs Bash/Write/Edit to run unattended against the
       // sandbox directory. Single-user local dev tool, not multi-tenant
       // production — see the residual-risk note at the top of this file.
+      //
+      // The SDK requires allowDangerouslySkipPermissions: true alongside
+      // permissionMode: "bypassPermissions" (checked against
+      // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs — without it the
+      // underlying CLI does not actually enter bypass mode). The real safety
+      // boundary either way is the explicit `tools`/`allowedTools` allowlist
+      // above, not this flag — it only controls whether individual calls to
+      // those six already-allowed tools additionally need interactive
+      // confirmation, which nothing here can answer.
       permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
     },
   });
 
