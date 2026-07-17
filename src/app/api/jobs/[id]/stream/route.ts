@@ -1,4 +1,5 @@
-import type { NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { assertJobOwnership } from "@/lib/authz";
 import { getEventsSince, type EventRow } from "@/server/events";
 import { getJob } from "@/server/jobs";
 
@@ -31,6 +32,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: jobId } = await params;
+
+  try {
+    await assertJobOwnership(jobId);
+  } catch {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   const lastEventIdHeader = request.headers.get("last-event-id");
   const afterParam = request.nextUrl.searchParams.get("after");

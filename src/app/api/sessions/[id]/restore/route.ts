@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { assertSessionOwnership } from "@/lib/authz";
 import { getSessionFiles } from "@/server/files";
 import { sandboxProvider } from "@/server/sandbox";
 
@@ -18,6 +19,12 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: sessionId } = await params;
+
+  try {
+    await assertSessionOwnership(sessionId);
+  } catch {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   const files = await getSessionFiles(sessionId);
   if (files.length === 0) {

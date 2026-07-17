@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { assertJobOwnership } from "@/lib/authz";
 import { runAgentLoop } from "@/server/agent";
 import { appendEvent } from "@/server/events";
 import { getJob, setJobStatus } from "@/server/jobs";
@@ -29,6 +30,12 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: jobId } = await params;
+
+  try {
+    await assertJobOwnership(jobId);
+  } catch {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   let body: MessagesRequestBody;
   try {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { assertProjectOwnership } from "@/lib/authz";
 import { getProjectDetail } from "@/server/projects";
 
 /**
@@ -12,6 +13,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: projectId } = await params;
+
+  try {
+    await assertProjectOwnership(projectId);
+  } catch {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   const detail = await getProjectDetail(projectId);
   if (!detail) {

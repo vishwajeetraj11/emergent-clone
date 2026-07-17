@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { assertSessionOwnership } from "@/lib/authz";
 import { deploySessionToVercel, isVercelConfigured } from "@/server/vercel";
 
 /**
@@ -14,6 +15,12 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: sessionId } = await params;
+
+  try {
+    await assertSessionOwnership(sessionId);
+  } catch {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   if (!isVercelConfigured()) {
     return NextResponse.json({

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { assertSessionOwnership, ForbiddenError } from "@/lib/authz";
 import { forkSession } from "@/server/sessions";
 
 /**
@@ -16,6 +17,7 @@ export async function POST(
   const { id: sessionId } = await params;
 
   try {
+    await assertSessionOwnership(sessionId);
     const { session, job, fileCount } = await forkSession(sessionId);
     return NextResponse.json({
       session: { id: session.id, parentSessionId: session.parentSessionId },
@@ -25,7 +27,8 @@ export async function POST(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[api/sessions/${sessionId}/fork] failed`, err);
-    const status = message === "Session not found" ? 404 : 500;
+    const status =
+      message === "Session not found" || err instanceof ForbiddenError ? 404 : 500;
     return NextResponse.json({ error: message }, { status });
   }
 }
