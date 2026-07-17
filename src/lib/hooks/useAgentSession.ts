@@ -90,10 +90,47 @@ export function useAgentSession() {
   const [state, setState] = useState<AgentSessionState>(INITIAL_STATE);
   const eventSourceRef = useRef<EventSource | null>(null);
 
+  // RAF-batched event ingestion: a burst of SSE messages (the agent can fire
+  // many `tool_call`/`assistant_message` events within milliseconds of each
+  // other) previously triggered one setState + one full array copy/re-sort
+  // per event. Buffer incoming events here and flush them into state at most
+  // once per animation frame instead, so render/sort cost is capped at
+  // display refresh rate regardless of burst size.
+  const pendingEventsRef = useRef<TimelineEvent[]>([]);
+  const rafIdRef = useRef<number | null>(null);
+
+  const flushPendingEvents = useCallback(() => {
+    rafIdRef.current = null;
+    const pending = pendingEventsRef.current;
+    if (pending.length === 0) return;
+    pendingEventsRef.current = [];
+    setState((prev) => {
+      const seen = new Set(prev.events.map((ev) => ev.seq));
+      const fresh: TimelineEvent[] = [];
+      for (const ev of pending) {
+        if (seen.has(ev.seq)) continue;
+        seen.add(ev.seq);
+        fresh.push(ev);
+      }
+      if (fresh.length === 0) return prev;
+      return {
+        ...prev,
+        events: [...prev.events, ...fresh].sort((a, b) => a.seq - b.seq),
+      };
+    });
+  }, []);
+
   const closeStream = useCallback(() => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    // Flush whatever arrived right before the stream closed (terminal
+    // job_status, unmount, or resubscribing) so nothing buffered is lost.
+    flushPendingEvents();
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
-  }, []);
+  }, [flushPendingEvents]);
 
   const subscribe = useCallback(
     (jobId: string, after = -1) => {
@@ -106,13 +143,10 @@ export function useAgentSession() {
           const messageEvent = e as MessageEvent<string>;
           try {
             const parsed = JSON.parse(messageEvent.data) as TimelineEvent;
-            setState((prev) => {
-              if (prev.events.some((ev) => ev.seq === parsed.seq)) return prev;
-              return {
-                ...prev,
-                events: [...prev.events, parsed].sort((a, b) => a.seq - b.seq),
-              };
-            });
+            pendingEventsRef.current.push(parsed);
+            if (rafIdRef.current === null) {
+              rafIdRef.current = requestAnimationFrame(flushPendingEvents);
+            }
           } catch (err) {
             console.error("Failed to parse SSE event", err);
           }
@@ -162,7 +196,7 @@ export function useAgentSession() {
       // Last-Event-ID automatically — nothing to do here.
       es.onerror = () => {};
     },
-    [closeStream]
+    [closeStream, flushPendingEvents]
   );
 
   useEffect(() => closeStream, [closeStream]);

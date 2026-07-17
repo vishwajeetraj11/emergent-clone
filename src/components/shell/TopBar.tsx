@@ -209,6 +209,7 @@ export function TopBar({
         <button
           type="button"
           aria-label="New project"
+          onClick={onNavigateHome}
           className="flex shrink-0 items-center justify-center rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
         >
           <Plus className="size-3.5" />
