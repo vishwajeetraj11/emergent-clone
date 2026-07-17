@@ -37,7 +37,7 @@ export function Timeline({
             const text = (event.payload as { text?: string }).text ?? "";
             return (
               <div
-                key={event.seq}
+                key={`${event.jobId}-${event.seq}`}
                 className="self-end whitespace-pre-wrap rounded-lg bg-secondary px-3 py-2 text-sm text-foreground"
               >
                 {text}
@@ -46,13 +46,13 @@ export function Timeline({
           }
           case "assistant_message": {
             const text = (event.payload as { text?: string }).text ?? "";
-            return <Markdown key={event.seq} text={text} />;
+            return <Markdown key={`${event.jobId}-${event.seq}`} text={text} />;
           }
           case "status": {
             const text = (event.payload as { text?: string }).text ?? "";
             return (
               <div
-                key={event.seq}
+                key={`${event.jobId}-${event.seq}`}
                 className="flex items-center gap-2 text-xs text-muted-foreground"
               >
                 <span className="relative flex size-1.5 shrink-0">
@@ -72,7 +72,7 @@ export function Timeline({
             const answers = findAnswerFor(events, payload.toolUseId);
             return (
               <QuestionCard
-                key={event.seq}
+                key={`${event.jobId}-${event.seq}`}
                 toolUseId={payload.toolUseId}
                 questions={payload.questions}
                 answers={answers}
@@ -86,7 +86,7 @@ export function Timeline({
             if (paths.length === 0) return null;
             return (
               <FilesChangedCard
-                key={event.seq}
+                key={`${event.jobId}-${event.seq}`}
                 sessionId={sessionId ?? null}
                 paths={paths}
               />
@@ -98,7 +98,7 @@ export function Timeline({
               "Something went wrong.";
             return (
               <div
-                key={event.seq}
+                key={`${event.jobId}-${event.seq}`}
                 className="rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-400"
               >
                 {message}

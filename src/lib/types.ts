@@ -44,6 +44,7 @@ export interface AnswerItem {
 /** Shape of one event as delivered over SSE / consumed by the client. */
 export interface TimelineEvent {
   seq: number;
+  jobId: string;
   role: EventRole;
   type: TimelineEventType;
   payload: Record<string, unknown>;

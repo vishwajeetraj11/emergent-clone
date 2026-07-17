@@ -1,6 +1,6 @@
 import { and, asc, eq, gt, sql } from "drizzle-orm";
 import { getDb } from "@/db";
-import { events } from "@/db/schema";
+import { events, jobs } from "@/db/schema";
 import { isUniqueViolation } from "@/server/db-utils";
 import type { EventRole, TimelineEventType } from "@/lib/types";
 
@@ -67,4 +67,32 @@ export async function getEventsSince(
 /** All events for a job, oldest first. Convenience wrapper over getEventsSince. */
 export async function getAllEvents(jobId: string): Promise<EventRow[]> {
   return getEventsSince(jobId, -1);
+}
+
+/**
+ * All events across every job belonging to a session, ordered chronologically
+ * (by created_at, ascending). `seq` is only unique within a single job — a
+ * session can span many jobs over its lifetime (the initial build plus one
+ * new job per "continue chatting" message) — so this joins events -> jobs to
+ * scope by session and orders by wall-clock time instead of the per-job seq,
+ * since job N's events always happen strictly after job N-1's.
+ */
+export async function getSessionEvents(
+  sessionId: string
+): Promise<(EventRow & { jobId: string })[]> {
+  const db = getDb();
+  return db
+    .select({
+      id: events.id,
+      jobId: events.jobId,
+      seq: events.seq,
+      role: events.role,
+      type: events.type,
+      payload: events.payload,
+      createdAt: events.createdAt,
+    })
+    .from(events)
+    .innerJoin(jobs, eq(events.jobId, jobs.id))
+    .where(eq(jobs.sessionId, sessionId))
+    .orderBy(asc(events.createdAt));
 }

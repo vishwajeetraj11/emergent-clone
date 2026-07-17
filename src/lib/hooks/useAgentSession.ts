@@ -105,17 +105,28 @@ export function useAgentSession() {
     if (pending.length === 0) return;
     pendingEventsRef.current = [];
     setState((prev) => {
-      const seen = new Set(prev.events.map((ev) => ev.seq));
+      // `seq` is only unique within a single job — a session can span many
+      // jobs (initial build + one per "continue chatting" message), so once
+      // multiple jobs' events coexist in `events`, dedup/keying must be
+      // scoped by job too.
+      const seen = new Set(prev.events.map((ev) => `${ev.jobId}:${ev.seq}`));
       const fresh: TimelineEvent[] = [];
       for (const ev of pending) {
-        if (seen.has(ev.seq)) continue;
-        seen.add(ev.seq);
+        const key = `${ev.jobId}:${ev.seq}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         fresh.push(ev);
       }
       if (fresh.length === 0) return prev;
       return {
         ...prev,
-        events: [...prev.events, ...fresh].sort((a, b) => a.seq - b.seq),
+        // `seq` alone no longer establishes a global order once multiple
+        // jobs' events coexist — createdAt is an ISO-8601 string (Postgres
+        // timestamptz via Drizzle, serialized by JSON.stringify/NextResponse
+        // .json), which sorts correctly lexicographically.
+        events: [...prev.events, ...fresh].sort((a, b) =>
+          a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0
+        ),
       };
     });
   }, []);
@@ -279,9 +290,15 @@ export function useAgentSession() {
 
   /**
    * Phase 3 persistence entry point: loads an existing project by id
-   * (GET /api/projects/[id]), replays its latest job's full event history
-   * over SSE from cursor -1, and — if the session has a `files` snapshot —
-   * tries to restore its sandbox so the preview iframe comes back too.
+   * (GET /api/projects/[id]), fetches the session's FULL event history
+   * across every job it has ever run (GET /api/sessions/[id]/events — a
+   * session can span many jobs: the initial build plus one per "continue
+   * chatting" message, and `data.job` here is only the most recent one), and
+   * — if the latest job isn't in a terminal state — subscribes to its SSE
+   * stream from cursor -1 for live updates (dedup keyed by jobId:seq skips
+   * anything already loaded from history). If the session has a `files`
+   * snapshot, also tries to restore its sandbox so the preview iframe comes
+   * back too.
    */
   const loadProject = useCallback(
     async (projectId: string) => {
@@ -297,15 +314,32 @@ export function useAgentSession() {
           session: { id: string } | null;
           job: { id: string; status: JobStatus } | null;
         };
+
+        let history: TimelineEvent[] = [];
+        if (data.session) {
+          try {
+            const historyRes = await fetch(`/api/sessions/${data.session.id}/events`);
+            if (historyRes.ok) {
+              const historyData = (await historyRes.json()) as { events: TimelineEvent[] };
+              history = historyData.events;
+            }
+          } catch (err) {
+            console.error("Failed to load session history", err);
+          }
+        }
+
         setState((prev) => ({
           ...prev,
           project: data.project,
           sessionId: data.session?.id ?? null,
           jobId: data.job?.id ?? null,
           jobStatus: data.job?.status ?? null,
+          events: history,
           isLoadingProject: false,
         }));
-        if (data.job) subscribe(data.job.id, -1);
+        if (data.job && !TERMINAL_JOB_STATUSES.has(data.job.status)) {
+          subscribe(data.job.id, -1);
+        }
         if (data.session) attemptRestorePreview(data.session.id);
       } catch (err) {
         setState((prev) => ({
@@ -356,11 +390,12 @@ export function useAgentSession() {
   /**
    * Continues chatting against the *current* session once its job has
    * reached a terminal status (done/stopped/failed) — creates a new job
-   * under the same session (see continueSessionWithPrompt) and replaces the
-   * visible timeline with that new job's own events. The `events` table's
-   * seq is job-scoped, so a fresh job's timeline necessarily starts over
-   * rather than appending to the previous job's — same as switching to a
-   * forked session.
+   * under the same session (see continueSessionWithPrompt) and appends that
+   * new job's events onto the existing timeline. The `events` table's `seq`
+   * is only job-scoped, but the dedup/sort logic in flushPendingEvents keys
+   * on jobId:seq and orders by createdAt, so it's safe to keep whatever's
+   * already in state here rather than resetting it — the new job's events
+   * layer on top through the normal SSE handling.
    */
   const continueChat = useCallback(
     async (prompt: string) => {
@@ -382,7 +417,6 @@ export function useAgentSession() {
           ...prev,
           jobId: data.job.id,
           jobStatus: data.job.status,
-          events: [],
           isSendingMessage: false,
         }));
         subscribe(data.job.id, -1);

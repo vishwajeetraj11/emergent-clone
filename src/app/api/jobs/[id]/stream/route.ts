@@ -13,6 +13,7 @@ const TERMINAL_STATUSES = new Set(["done", "stopped", "failed"]);
 function formatEventMessage(event: EventRow): string {
   const data = JSON.stringify({
     seq: event.seq,
+    jobId: event.jobId,
     role: event.role,
     type: event.type,
     payload: event.payload,
