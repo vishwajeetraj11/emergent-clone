@@ -36,6 +36,13 @@
       "when": 1784239340179,
       "tag": "0004_odd_korvac",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784285489309,
+      "tag": "0005_useful_jack_power",
+      "breakpoints": true
     }
   ]
 }

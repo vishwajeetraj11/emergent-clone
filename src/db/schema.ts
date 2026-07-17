@@ -40,6 +40,14 @@ export const users = pgTable("users", {
   // src/lib/auth.ts's isClerkConfigured()) — single-user dev mode (the
   // default, unconfigured behavior) never touches this column.
   clerkUserId: varchar("clerk_user_id", { length: 255 }).unique(),
+  // GitHub App installation id for this user's connected GitHub account (see
+  // src/server/github-app.ts). Nullable — stays null until the user
+  // completes the "Install GitHub App" flow (GET /api/github/connect ->
+  // GitHub's consent screen -> GET /api/github/install/callback). Stored as
+  // varchar rather than a numeric type: installation ids are large numbers
+  // but this app never does arithmetic on them, so varchar sidesteps any
+  // precision edge cases (e.g. bigint/JS number interop) for no cost.
+  githubInstallationId: varchar("github_installation_id", { length: 64 }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -79,8 +87,8 @@ export const sessions = pgTable("sessions", {
     { onDelete: "set null" }
   ),
   // Phase 3: last GitHub repo this session's files were pushed to (Save
-  // button), nullable — stays null until a real GITHUB_TOKEN is configured
-  // and a save actually succeeds.
+  // button), nullable — stays null until the GitHub App is configured and
+  // the current user has connected it, and a save actually succeeds.
   githubRepoUrl: text("github_repo_url"),
   // Phase 4: last Vercel deployment URL for this session's files ("Deploy
   // Your Application"), nullable — stays null until a real VERCEL_TOKEN is

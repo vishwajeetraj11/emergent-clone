@@ -9,7 +9,13 @@ import type {
   TimelineEventType,
 } from "@/lib/types";
 
-export type SaveState = "idle" | "saving" | "done" | "error" | "not_configured";
+export type SaveState =
+  | "idle"
+  | "saving"
+  | "done"
+  | "error"
+  | "not_configured"
+  | "not_connected";
 export type DeployState = "idle" | "deploying" | "done" | "error" | "not_configured";
 
 interface AgentSessionState {
@@ -478,9 +484,12 @@ export function useAgentSession() {
     }
   }, [state.sessionId, subscribe, attemptRestorePreview]);
 
-  /** GitHub save (Half B — see src/server/github.ts): gated inert when
-   * GITHUB_TOKEN isn't configured, surfaced as saveState "not_configured"
-   * rather than a silent no-op or a thrown error. */
+  /** GitHub save (see src/server/github-app.ts): a real GitHub App +
+   * installation-token flow. Three distinguishable outcomes from the API:
+   * not configured at all (saveState "not_configured"), configured but this
+   * user hasn't installed the app yet (saveState "not_connected" — the
+   * frontend shows a "Connect GitHub" affordance), or a real save
+   * success/failure. */
   const saveToGitHub = useCallback(async () => {
     const sessionId = state.sessionId;
     if (!sessionId) return;
@@ -489,22 +498,31 @@ export function useAgentSession() {
       const res = await fetch(`/api/sessions/${sessionId}/save-github`, { method: "POST" });
       const data = (await res.json().catch(() => ({}))) as {
         configured?: boolean;
+        connected?: boolean;
         url?: string;
         error?: string;
       };
-      if (!res.ok || data.error) {
-        setState((prev) => ({
-          ...prev,
-          saveState: data.configured === false ? "not_configured" : "error",
-          saveMessage: data.error ?? `Request failed (${res.status})`,
-        }));
-        return;
-      }
       if (data.configured === false) {
         setState((prev) => ({
           ...prev,
           saveState: "not_configured",
           saveMessage: data.error ?? "GitHub is not configured in this environment.",
+        }));
+        return;
+      }
+      if (data.connected === false) {
+        setState((prev) => ({
+          ...prev,
+          saveState: "not_connected",
+          saveMessage: null,
+        }));
+        return;
+      }
+      if (!res.ok || data.error) {
+        setState((prev) => ({
+          ...prev,
+          saveState: "error",
+          saveMessage: data.error ?? `Request failed (${res.status})`,
         }));
         return;
       }

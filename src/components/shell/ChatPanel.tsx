@@ -57,7 +57,10 @@ function IconAction({
   );
 }
 
-const SAVE_STATUS_TEXT: Record<Exclude<SaveState, "idle">, (message: string | null, url: string | null) => string> = {
+const SAVE_STATUS_TEXT: Record<
+  Exclude<SaveState, "idle" | "not_connected">,
+  (message: string | null, url: string | null) => string
+> = {
   saving: () => "Saving to GitHub…",
   done: (_message, url) => (url ? `Saved to GitHub: ${url}` : "Saved to GitHub."),
   error: (message) => message ?? "Failed to save to GitHub.",
@@ -229,19 +232,31 @@ export function ChatPanel({
         )}
         <StatusStrip jobStatus={jobStatus} />
 
-        {saveState !== "idle" && (
-          <div
-            className={cn(
-              "mb-2 rounded-md px-2.5 py-1.5 text-xs",
-              saveState === "error"
-                ? "bg-red-500/10 text-red-400"
-                : saveState === "not_configured"
-                  ? "bg-secondary/60 text-muted-foreground"
-                  : "bg-emerald-500/10 text-emerald-400"
-            )}
-          >
-            {SAVE_STATUS_TEXT[saveState](saveMessage, saveUrl)}
+        {saveState === "not_connected" ? (
+          <div className="mb-2 flex items-center justify-between gap-2 rounded-md bg-secondary/60 px-2.5 py-1.5 text-xs text-muted-foreground">
+            <span>Connect your GitHub account to save this project.</span>
+            <a
+              href="/api/github/connect"
+              className="shrink-0 rounded-md bg-foreground px-2 py-1 text-xs font-medium text-background transition-colors hover:bg-foreground/80"
+            >
+              Connect GitHub
+            </a>
           </div>
+        ) : (
+          saveState !== "idle" && (
+            <div
+              className={cn(
+                "mb-2 rounded-md px-2.5 py-1.5 text-xs",
+                saveState === "error"
+                  ? "bg-red-500/10 text-red-400"
+                  : saveState === "not_configured"
+                    ? "bg-secondary/60 text-muted-foreground"
+                    : "bg-emerald-500/10 text-emerald-400"
+              )}
+            >
+              {SAVE_STATUS_TEXT[saveState](saveMessage, saveUrl)}
+            </div>
+          )
         )}
 
         {deployState !== "idle" && (

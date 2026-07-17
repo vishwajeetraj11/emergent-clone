@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "github_installation_id" varchar(64);

@@ -9,8 +9,9 @@ import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
 // Unconfigured (default, always-tested path): DEV_USER owns every row and
 // there is no real multi-tenancy, so every assert*Ownership call below is a
 // no-op that returns immediately — same "gated inert" pattern already used
-// throughout this codebase (isGitHubConfigured in src/server/github.ts,
-// isVercelConfigured in src/server/vercel.ts, isStripeConfigured). This MUST
+// throughout this codebase (isGitHubAppConfigured in
+// src/server/github-app.ts, isVercelConfigured in src/server/vercel.ts,
+// isStripeConfigured). This MUST
 // NOT change any behavior in the unconfigured path.
 //
 // Configured: resolves the real signed-in Clerk user (getCurrentUser) and
