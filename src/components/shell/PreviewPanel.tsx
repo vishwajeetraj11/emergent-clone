@@ -2,17 +2,20 @@
 
 import { X } from "lucide-react";
 import { OnboardingCarousel } from "@/components/shell/OnboardingCarousel";
+import { ProjectsList } from "@/components/shell/ProjectsList";
 
 export function PreviewPanel({
   previewUrl,
   isRestoring = false,
   restoreError = null,
+  onSelectProject,
 }: {
   previewUrl?: string | null;
   /** Phase 3: POST /api/sessions/[id]/restore is in flight — bringing the
    * sandbox back up from its `files` snapshot (persistence / fork). */
   isRestoring?: boolean;
   restoreError?: string | null;
+  onSelectProject?: (projectId: string) => void;
 }) {
   return (
     <section className="flex h-full flex-1 flex-col bg-background">
@@ -59,6 +62,7 @@ export function PreviewPanel({
             </p>
           )}
           <OnboardingCarousel />
+          {onSelectProject && <ProjectsList onSelectProject={onSelectProject} />}
         </div>
       )}
     </section>

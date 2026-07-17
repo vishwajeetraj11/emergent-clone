@@ -19,6 +19,16 @@ export interface ProjectDetail {
   job: JobRow | null;
 }
 
+/** Every project owned by a user, most recent first — backs GET /api/projects (dashboard list). */
+export async function listProjectsForUser(userId: string): Promise<ProjectRow[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(projects)
+    .where(eq(projects.userId, userId))
+    .orderBy(desc(projects.createdAt));
+}
+
 export async function getProjectDetail(projectId: string): Promise<ProjectDetail | null> {
   const db = getDb();
 

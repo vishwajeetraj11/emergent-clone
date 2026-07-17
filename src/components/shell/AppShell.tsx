@@ -72,6 +72,7 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
           previewUrl={session.previewUrl}
           isRestoring={session.isRestoringPreview}
           restoreError={session.restoreError}
+          onSelectProject={(id) => router.push(`/p/${id}`)}
         />
       </main>
     </div>

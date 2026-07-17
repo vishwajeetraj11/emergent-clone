@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { UserButton } from "@clerk/nextjs";
 import { Bell, Home, Plus, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -8,6 +9,17 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { DEV_USER } from "@/lib/dev-user";
 import { cn } from "@/lib/utils";
 import type { JobStatus, ProjectSummary } from "@/lib/types";
+
+// Client-safe Clerk check — mirrors src/lib/auth.ts's isClerkConfigured(),
+// but that helper reads CLERK_SECRET_KEY, which is never available in
+// client bundles by design (Next.js only inlines NEXT_PUBLIC_* vars
+// client-side). This checks only the publishable key, which is genuinely
+// safe to expose. Assumes both keys are always set together, same as every
+// other isXConfigured() check in this codebase — a publishable key set
+// without a matching secret key (an unsupported partial config) would try
+// to render <UserButton> without the <ClerkProvider> that ClerkGate only
+// mounts when BOTH keys are present, and crash.
+const CLERK_CONFIGURED_CLIENT = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
 
 type ProjectTab = {
   id: string;
@@ -238,14 +250,18 @@ export function TopBar({
           </TooltipTrigger>
           <TooltipContent>Notifications</TooltipContent>
         </Tooltip>
-        <Avatar size="sm">
-          <AvatarFallback>
-            {DEV_USER.name
-              .split(" ")
-              .map((part) => part[0])
-              .join("")}
-          </AvatarFallback>
-        </Avatar>
+        {CLERK_CONFIGURED_CLIENT ? (
+          <UserButton />
+        ) : (
+          <Avatar size="sm">
+            <AvatarFallback>
+              {DEV_USER.name
+                .split(" ")
+                .map((part) => part[0])
+                .join("")}
+            </AvatarFallback>
+          </Avatar>
+        )}
       </div>
     </header>
   );
