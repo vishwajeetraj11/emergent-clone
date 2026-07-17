@@ -12,7 +12,7 @@ import {
 import { appendEvent, getAllEvents, type EventRow } from "@/server/events";
 import { getJob, setAgentSessionId, setJobStatus } from "@/server/jobs";
 import { sandboxProvider, seedSandboxTemplate } from "@/server/sandbox";
-import { snapshotSessionFiles } from "@/server/files";
+import { getSessionFiles, snapshotSessionFiles } from "@/server/files";
 import { debitForJobUsage } from "@/server/credits";
 import type { AnswerItem, Question } from "@/lib/types";
 
@@ -774,6 +774,22 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
   if (sessionId) await setAgentSessionId(jobId, sessionId);
 }
 
+// Continuing an already-built session (src/server/sessions.ts's
+// continueSessionWithPrompt) used to run through the exact same
+// from-scratch scoping flow as a brand-new project — ask_user firing a
+// generic "what are you building" style questionnaire with zero awareness
+// that a real app, with real existing files, already sits in this session's
+// sandbox. Bad UX: a request like "change some colors" got asked "is this
+// an existing app or a new one?" Real coding-agent UX for a follow-up edit
+// is to just make the change (using judgment for anything ambiguous) rather
+// than block on a multiple-choice form — this plan text tells the build
+// query to behave that way.
+const CONTINUATION_PLAN_TEXT = `This is a continuation of an app that is already built and running in this working directory — it is NOT a fresh build, so do not scaffold from scratch or assume an empty project.
+
+First inspect the existing files (list the directory, then read whatever's relevant to the request) to understand the current implementation and its conventions, then make the requested change directly.
+
+Only stop to ask a clarifying question if the request is genuinely ambiguous in a way that risks doing the wrong thing. For a straightforward iterative request, make a reasonable choice consistent with the existing app and note what you chose in your closing summary — don't block on a multiple-choice questionnaire for a small change.`;
+
 async function runRealLoop(jobId: string): Promise<void> {
   try {
     if (await isStopped(jobId)) return;
@@ -800,6 +816,24 @@ async function runRealLoop(jobId: string): Promise<void> {
     const prompt = (userMessageEvent?.payload as { text?: string } | undefined)?.text;
     if (!prompt) {
       throw new Error("Job has no initial user message to build a prompt from.");
+    }
+
+    const job = await getJob(jobId);
+    if (!job) return;
+
+    // The real signal for "is this a continuation" is the session's own
+    // state, not which route created the job — a brand-new project's first
+    // job always has zero files at this point (nothing's been built yet),
+    // and any later job in the same session only reaches here once a build
+    // has actually produced files. No flag needs to be threaded through
+    // createProjectAndJob/continueSessionWithPrompt for this to be correct.
+    const existingFiles = await getSessionFiles(job.sessionId);
+    if (existingFiles.length > 0) {
+      await appendEvent(jobId, "assistant", "assistant_message", {
+        text: "Got it — let me take a look at the app and make that change.",
+      });
+      await runBuildPhase(jobId, job.sessionId, prompt, CONTINUATION_PLAN_TEXT);
+      return;
     }
 
     await runScopingQuery(jobId, prompt);
