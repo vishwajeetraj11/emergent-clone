@@ -546,7 +546,12 @@ export function ChatPanel({
           />
           <div className="flex items-center justify-between pt-1">
             <div className="flex items-center gap-0.5">
-              <IconAction icon={<Paperclip className="size-4" />} label="Attach" />
+              {/* No onClick on purpose — attachments aren't built yet. Kept
+                  hoverable (not `disabled`) so the tooltip can say why. */}
+              <IconAction
+                icon={<Paperclip className="size-4 opacity-40" />}
+                label="Attachments — coming soon"
+              />
               <IconAction
                 icon={<GithubIcon className="size-4" />}
                 label="Save"
@@ -590,6 +595,7 @@ export function ChatPanel({
                 disabled={!isVoiceSupported || composerDisabled}
               />
             </div>
+            <div className="flex items-center gap-2">
             {canContinueChat && (
               <Tooltip>
                 <TooltipTrigger
@@ -637,6 +643,7 @@ export function ChatPanel({
                 <TooltipContent>Send</TooltipContent>
               </Tooltip>
             )}
+            </div>
           </div>
         </div>
       </div>
