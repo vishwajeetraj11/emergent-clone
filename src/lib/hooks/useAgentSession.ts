@@ -35,6 +35,11 @@ interface AgentSessionState {
   /** Phase 3: POST /api/sessions/[id]/restore is in flight. */
   isRestoringPreview: boolean;
   restoreError: string | null;
+  /** Set when a background health poll (GET /api/sessions/[id]/preview-health)
+   * finds the sandbox gone — e.g. a Vercel VM hit its max timeout while the
+   * tab was open. PreviewPanel swaps the (now-stale) iframe for a "Preview
+   * stopped" restart card when this is true. */
+  isPreviewDead: boolean;
   /** Phase 3: POST /api/sessions/[id]/fork is in flight. */
   isForking: boolean;
   /** Phase 3: sending a new top-level message against an existing session
@@ -67,6 +72,39 @@ const EVENT_TYPES: TimelineEventType[] = [
 
 const TERMINAL_JOB_STATUSES = new Set<JobStatus>(["done", "stopped", "failed"]);
 
+/** Fire-and-forget sandbox teardown on navigate-away — sendBeacon survives page
+ * unload where plain fetch may be dropped; keepalive fetch is the fallback. */
+function sendStopPreview(sessionId: string): void {
+  const url = `/api/sessions/${sessionId}/stop-preview`;
+  let queued = false;
+  try {
+    queued = navigator.sendBeacon(url);
+  } catch {
+    queued = false;
+  }
+  if (!queued) void fetch(url, { method: "POST", keepalive: true }).catch(() => {});
+}
+
+/**
+ * Guards every sendStopPreview call site: never stop while a build is
+ * actively pushing files into the live sandbox (see src/server/agent.ts's
+ * runBuildPhase syncFiles calls) — only a terminal job status (or no job
+ * started yet) makes that safe — and only bother once a preview has
+ * actually shown up at least once (a null previewUrl means there's nothing
+ * running to stop).
+ */
+function canStopPreview(session: {
+  sessionId: string | null;
+  previewUrl: string | null;
+  jobStatus: JobStatus | null;
+}): session is { sessionId: string; previewUrl: string | null; jobStatus: JobStatus | null } {
+  return (
+    session.sessionId !== null &&
+    session.previewUrl !== null &&
+    (session.jobStatus === null || TERMINAL_JOB_STATUSES.has(session.jobStatus))
+  );
+}
+
 const INITIAL_STATE: AgentSessionState = {
   project: null,
   sessionId: null,
@@ -79,6 +117,7 @@ const INITIAL_STATE: AgentSessionState = {
   isLoadingProject: false,
   isRestoringPreview: false,
   restoreError: null,
+  isPreviewDead: false,
   isForking: false,
   isSendingMessage: false,
   saveState: "idle",
@@ -99,6 +138,20 @@ const INITIAL_STATE: AgentSessionState = {
 export function useAgentSession() {
   const [state, setState] = useState<AgentSessionState>(INITIAL_STATE);
   const eventSourceRef = useRef<EventSource | null>(null);
+
+  /** Mirrors {projectId, sessionId, previewUrl, jobStatus} for reads that
+   * must always see the latest values regardless of a callback's own
+   * memoization deps — specifically canStopPreview's guard, checked both
+   * from the long-lived `pagehide` listener below (attached once, so its
+   * closure is never refreshed) and from a few in-app switch-away call
+   * sites whose useCallback dependency arrays don't already track all four
+   * fields. Kept in sync by the effect right after the pagehide one below. */
+  const liveSessionRef = useRef<{
+    projectId: string | null;
+    sessionId: string | null;
+    previewUrl: string | null;
+    jobStatus: JobStatus | null;
+  }>({ projectId: null, sessionId: null, previewUrl: null, jobStatus: null });
 
   // RAF-batched event ingestion: a burst of SSE messages (the agent can fire
   // many `tool_call`/`assistant_message` events within milliseconds of each
@@ -184,7 +237,7 @@ export function useAgentSession() {
           const parsed = JSON.parse(messageEvent.data) as TimelineEvent;
           const url = (parsed.payload as { url?: string }).url;
           if (url) {
-            setState((prev) => ({ ...prev, previewUrl: url }));
+            setState((prev) => ({ ...prev, previewUrl: url, isPreviewDead: false }));
           }
         } catch (err) {
           console.error("Failed to parse preview_ready event", err);
@@ -223,6 +276,83 @@ export function useAgentSession() {
   useEffect(() => closeStream, [closeStream]);
 
   /**
+   * Background health poll: the preview iframe is cross-origin, so the
+   * client can't tell a dead sandbox (e.g. a Vercel VM hitting its 45-minute
+   * max timeout mid-session) apart from one loading normally — only a
+   * server-side probe can (GET /api/sessions/[id]/preview-health, backed by
+   * sandboxProvider.checkPreviewHealth). Runs every 45s while a preview is
+   * up, plus immediately on tab refocus so the common "came back after
+   * lunch" case doesn't wait out the interval. A fetch failure or non-OK
+   * response means nothing about the sandbox itself (main-server hiccup),
+   * so it's ignored rather than treated as death.
+   */
+  useEffect(() => {
+    if (!state.previewUrl || !state.sessionId || state.isPreviewDead) return;
+    const sessionId = state.sessionId;
+
+    let cancelled = false;
+
+    const checkHealth = async () => {
+      try {
+        const res = await fetch(`/api/sessions/${sessionId}/preview-health`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { alive: boolean };
+        if (!cancelled && data.alive === false) {
+          setState((prev) => ({ ...prev, isPreviewDead: true }));
+        }
+      } catch {
+        // Fetch itself failing says nothing about the sandbox — ignore.
+      }
+    };
+
+    const intervalId = setInterval(checkHealth, 45_000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") checkHealth();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [state.previewUrl, state.sessionId, state.isPreviewDead]);
+
+  useEffect(() => {
+    liveSessionRef.current = {
+      projectId: state.project?.id ?? null,
+      sessionId: state.sessionId,
+      previewUrl: state.previewUrl,
+      jobStatus: state.jobStatus,
+    };
+  }, [state.project, state.sessionId, state.previewUrl, state.jobStatus]);
+
+  /**
+   * Eager teardown on navigate-away/tab-close (the v2 sandbox counterpart
+   * to the health poll above): `pagehide` — not `visibilitychange` and not
+   * `beforeunload` — is the one page-lifecycle event that fires reliably on
+   * both a real unload AND a tab close/back-navigation, without
+   * `visibilitychange`'s "user just alt-tabbed for a second" false
+   * positives, and without defeating the back/forward cache the way
+   * `beforeunload` does. Firing on the bfcache-park path too (rather than
+   * gating on `event.persisted`) is deliberate: stopping the sandbox is
+   * safe even if the page later comes back from bfcache — the health poll
+   * above then just shows the paused card with a one-click resume, same as
+   * any other stop.
+   */
+  useEffect(() => {
+    if (!state.sessionId || !state.previewUrl) return;
+
+    const handlePageHide = () => {
+      const current = liveSessionRef.current;
+      if (canStopPreview(current)) sendStopPreview(current.sessionId);
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [state.sessionId, state.previewUrl]);
+
+  /**
    * Phase 3: tries to bring a session's sandbox up from its `files`
    * snapshot and reflect the resulting preview URL — used both after
    * loading an existing project (persistence) and right after a fork
@@ -247,6 +377,10 @@ export function useAgentSession() {
         ...prev,
         previewUrl: data.url,
         isRestoringPreview: false,
+        // Cleared here (not in restartPreview) so a FAILED restart keeps
+        // showing the dead card with restoreError, instead of falling back
+        // to the stale dead iframe — see restartPreview's doc comment.
+        isPreviewDead: false,
       }));
     } catch (err) {
       setState((prev) => ({
@@ -257,8 +391,30 @@ export function useAgentSession() {
     }
   }, []);
 
+  /**
+   * User-triggered retry from PreviewPanel's "Preview stopped" card — same
+   * restore-from-snapshot path attemptRestorePreview already uses elsewhere
+   * (loadProject/switchSession/fork), just fired from a click instead.
+   * Deliberately does NOT clear isPreviewDead itself: attemptRestorePreview's
+   * success path does that (see above), so a restart that fails leaves
+   * isPreviewDead true and restoreError set, keeping the dead card (now with
+   * the failure message) on screen rather than silently reverting to the
+   * stale iframe.
+   */
+  const restartPreview = useCallback(() => {
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    attemptRestorePreview(sessionId);
+  }, [state.sessionId, attemptRestorePreview]);
+
   const start = useCallback(
     async (prompt: string, onCreated?: (projectId: string) => void) => {
+      // A brand-new project discards whatever session/preview was
+      // previously loaded (see the previewUrl: null reset below) — stop
+      // its sandbox first so it isn't left running unattended.
+      const previous = liveSessionRef.current;
+      if (canStopPreview(previous)) sendStopPreview(previous.sessionId);
+
       setState((prev) => ({ ...prev, isStarting: true, error: null }));
       try {
         const res = await fetch("/api/projects", {
@@ -312,6 +468,14 @@ export function useAgentSession() {
    */
   const loadProject = useCallback(
     async (projectId: string) => {
+      // Only stop the outgoing session's sandbox when this is actually a
+      // switch to a DIFFERENT project — reloading the same one (e.g. a
+      // refresh) must not stop the preview it's about to restore anyway.
+      const previous = liveSessionRef.current;
+      if (previous.projectId !== projectId && canStopPreview(previous)) {
+        sendStopPreview(previous.sessionId);
+      }
+
       setState(() => ({ ...INITIAL_STATE, isLoadingProject: true }));
       try {
         const res = await fetch(`/api/projects/${projectId}`);
@@ -373,6 +537,10 @@ export function useAgentSession() {
   const switchSession = useCallback(
     async (sessionId: string, job: { id: string; status: JobStatus } | null) => {
       closeStream();
+
+      const previous = liveSessionRef.current;
+      if (canStopPreview(previous)) sendStopPreview(previous.sessionId);
+
       setState((prev) => ({
         ...prev,
         sessionId,
@@ -380,6 +548,7 @@ export function useAgentSession() {
         jobStatus: job?.status ?? null,
         events: [],
         previewUrl: null,
+        isPreviewDead: false,
         isLoadingProject: true,
         error: null,
       }));
@@ -526,6 +695,10 @@ export function useAgentSession() {
   const fork = useCallback(async () => {
     const sessionId = state.sessionId;
     if (!sessionId) return;
+
+    const previous = liveSessionRef.current;
+    if (canStopPreview(previous)) sendStopPreview(previous.sessionId);
+
     setState((prev) => ({ ...prev, isForking: true, error: null }));
     try {
       const res = await fetch(`/api/sessions/${sessionId}/fork`, { method: "POST" });
@@ -544,6 +717,7 @@ export function useAgentSession() {
         jobStatus: data.job.status,
         events: [],
         previewUrl: null,
+        isPreviewDead: false,
         isForking: false,
         saveState: "idle",
         saveMessage: null,
@@ -710,6 +884,7 @@ export function useAgentSession() {
     stop,
     continueChat,
     fork,
+    restartPreview,
     saveToGitHub,
     deployToVercel,
     renameProject,
