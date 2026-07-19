@@ -18,6 +18,8 @@ export function PreviewPanel({
   isPreviewDead = false,
   onRestartPreview,
   onSelectProject,
+  currentProjectId = null,
+  onNavigateHome,
 }: {
   previewUrl?: string | null;
   /** Phase 3: POST /api/sessions/[id]/restore is in flight — bringing the
@@ -30,6 +32,13 @@ export function PreviewPanel({
   isPreviewDead?: boolean;
   onRestartPreview?: () => void;
   onSelectProject?: (projectId: string) => void;
+  /** The project currently loaded in AppShell (session.project?.id), if
+   * any — passed through to ProjectsList so deleting it can navigate home
+   * instead of leaving a dead project open. */
+  currentProjectId?: string | null;
+  /** Same navigation AppShell's Home button uses — ProjectsList calls this
+   * when the project it just deleted is the one currently open. */
+  onNavigateHome?: () => void;
 }) {
   // Bumped by the reload button to force the iframe to remount and refetch
   // — there was previously no way to retry a stuck/erroring preview short of
@@ -132,7 +141,13 @@ export function PreviewPanel({
             </p>
           )}
           <OnboardingCarousel />
-          {onSelectProject && <ProjectsList onSelectProject={onSelectProject} />}
+          {onSelectProject && (
+            <ProjectsList
+              onSelectProject={onSelectProject}
+              currentProjectId={currentProjectId}
+              onNavigateHome={onNavigateHome}
+            />
+          )}
         </div>
       )}
     </section>

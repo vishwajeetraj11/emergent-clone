@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Trash2 } from "lucide-react";
 
 interface ProjectListItem {
   id: string;
@@ -21,10 +22,22 @@ interface ProjectListItem {
  */
 export function ProjectsList({
   onSelectProject,
+  currentProjectId = null,
+  onNavigateHome,
 }: {
   onSelectProject: (projectId: string) => void;
+  /** The project currently loaded in AppShell, if any — deleting it needs
+   * to navigate home the same way TopBar's Home button does, since there'd
+   * be nothing left to show in its place. */
+  currentProjectId?: string | null;
+  onNavigateHome?: () => void;
 }) {
   const [projects, setProjects] = useState<ProjectListItem[] | null>(null);
+  // Row mid-delete-confirm ("Delete? Yes/No") — inline, not window.confirm,
+  // matching no other confirm pattern existing in this codebase to reuse.
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,6 +54,30 @@ export function ProjectsList({
     };
   }, []);
 
+  /** DELETE /api/projects/[id] — same "update local state, no refetch" style
+   * as TopBar's renameProject. Navigates home when the deleted project is
+   * the one currently open, since its preview/chat would otherwise be left
+   * pointing at a project that no longer exists. */
+  async function handleDelete(id: string) {
+    setDeletingId(id);
+    setDeleteError(null);
+    try {
+      const res = await fetch(`/api/projects/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `Request failed (${res.status})`);
+      }
+      setProjects((prev) => prev?.filter((p) => p.id !== id) ?? prev);
+      setConfirmingId(null);
+      if (currentProjectId === id) onNavigateHome?.();
+    } catch (err) {
+      console.error("Failed to delete project", err);
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete project");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   if (!projects || projects.length === 0) return null;
 
   return (
@@ -48,19 +85,68 @@ export function ProjectsList({
       <h3 className="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
         Your projects
       </h3>
+      {deleteError && <p className="mb-1.5 px-1 text-xs text-red-400">{deleteError}</p>}
       <div className="flex max-h-64 flex-col gap-1.5 overflow-y-auto">
         {projects.map((p) => (
-          <button
+          <div
             key={p.id}
-            type="button"
+            role="button"
+            tabIndex={0}
             onClick={() => onSelectProject(p.id)}
-            className="flex items-center justify-between gap-3 rounded-md border border-border bg-secondary/30 px-3 py-2 text-left text-sm transition-colors hover:bg-secondary/60"
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              onSelectProject(p.id);
+            }}
+            className="group flex items-center justify-between gap-3 rounded-md border border-border bg-secondary/30 px-3 py-2 text-left text-sm transition-colors hover:bg-secondary/60"
           >
             <span className="truncate text-foreground">{p.name}</span>
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {new Date(p.createdAt).toLocaleDateString()}
-            </span>
-          </button>
+            {confirmingId === p.id ? (
+              <div className="flex shrink-0 items-center gap-1.5 text-xs">
+                <span className="text-muted-foreground">Delete?</span>
+                <button
+                  type="button"
+                  disabled={deletingId === p.id}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDelete(p.id);
+                  }}
+                  className="rounded-sm px-1 py-0.5 font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+                >
+                  {deletingId === p.id ? "…" : "Yes"}
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingId === p.id}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmingId(null);
+                  }}
+                  className="rounded-sm px-1 py-0.5 text-muted-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                >
+                  No
+                </button>
+              </div>
+            ) : (
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  {new Date(p.createdAt).toLocaleDateString()}
+                </span>
+                <button
+                  type="button"
+                  aria-label={`Delete ${p.name}`}
+                  title="Delete project"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmingId(p.id);
+                  }}
+                  className="rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-red-400 group-hover:opacity-100"
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
         ))}
       </div>
     </div>

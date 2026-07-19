@@ -79,6 +79,8 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
           isPreviewDead={session.isPreviewDead}
           onRestartPreview={session.restartPreview}
           onSelectProject={(id) => router.push(`/p/${id}`)}
+          currentProjectId={session.project?.id ?? null}
+          onNavigateHome={handleNavigateHome}
         />
       </main>
     </div>

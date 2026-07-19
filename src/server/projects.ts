@@ -2,6 +2,8 @@ import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { jobs, projects, sessions, users } from "@/db/schema";
 import type { JobRow, ProjectRow, SessionRow } from "@/server/jobs";
+import { dropProjectDatabase } from "@/server/project-db";
+import { sandboxProvider } from "@/server/sandbox";
 
 // ---------------------------------------------------------------------------
 // Phase 3: read-side helper for the persistence route (GET /api/projects/[id])
@@ -122,6 +124,52 @@ export async function renameProject(
     .where(eq(projects.id, projectId))
     .returning();
   return project ?? null;
+}
+
+/**
+ * Deletes a project and everything under it — backs DELETE
+ * /api/projects/[id]. Two teardown steps happen first, each best-effort
+ * (wrapped in its own try/catch, console.error on failure): stopping every
+ * session's sandbox (a dead/unreachable local process or Vercel VM must
+ * never block deletion) and dropping the project's Neon database if one was
+ * ever provisioned (an unreachable Neon API must not block it either). The
+ * actual `projects` row delete is what does the real work — FK cascades
+ * (see src/db/schema.ts) take care of sessions -> jobs -> events/files rows,
+ * so nothing else needs deleting explicitly. Returns false if the project
+ * doesn't exist (route maps that to 404), true once deleted.
+ */
+export async function deleteProject(projectId: string): Promise<boolean> {
+  const db = getDb();
+
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return false;
+
+  const sessionRows = await db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(eq(sessions.projectId, projectId));
+
+  for (const s of sessionRows) {
+    try {
+      await sandboxProvider.stop(s.id);
+    } catch (err) {
+      console.error(`[projects] failed to stop sandbox for session ${s.id}`, err);
+    }
+  }
+
+  if (project.neonProjectId) {
+    try {
+      await dropProjectDatabase(project.neonProjectId);
+    } catch (err) {
+      console.error(
+        `[projects] failed to drop Neon project ${project.neonProjectId}`,
+        err
+      );
+    }
+  }
+
+  await db.delete(projects).where(eq(projects.id, projectId));
+  return true;
 }
 
 export interface ProjectAgentContext {

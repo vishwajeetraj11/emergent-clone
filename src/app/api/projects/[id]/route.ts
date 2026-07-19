@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { assertProjectOwnership } from "@/lib/authz";
-import { getProjectDetail, renameProject } from "@/server/projects";
+import { deleteProject, getProjectDetail, renameProject } from "@/server/projects";
 
 /**
  * Phase 3 persistence: backs the /p/[projectId] route. Returns the project
@@ -74,4 +74,25 @@ export async function PATCH(
       status: project.status,
     },
   });
+}
+
+/** Deletes a project — see deleteProject in src/server/projects.ts for the sandbox/Neon teardown it does first. */
+export async function DELETE(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: projectId } = await params;
+
+  try {
+    await assertProjectOwnership(projectId);
+  } catch {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  const deleted = await deleteProject(projectId);
+  if (!deleted) {
+    return NextResponse.json({ error: "Project not found" }, { status: 404 });
+  }
+
+  return NextResponse.json({ ok: true });
 }
