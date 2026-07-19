@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   GitFork,
+  Globe,
+  History,
   Mic,
   MessageSquareDashed,
   Paperclip,
@@ -17,10 +19,193 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Timeline } from "@/components/shell/Timeline";
+import { useSpeechRecognition } from "@/lib/hooks/useSpeechRecognition";
 import { cn } from "@/lib/utils";
 import type { AnswerItem, JobStatus, TimelineEvent } from "@/lib/types";
 import type { DeployState, SaveState } from "@/lib/hooks/useAgentSession";
+
+interface SessionSummary {
+  id: string;
+  parentSessionId: string | null;
+  createdAt: string;
+  job: { id: string; status: JobStatus } | null;
+}
+
+/**
+ * Dropdown listing every session under the current project (original +
+ * every fork) — without this, forkSession's newest-session-wins behavior
+ * (see getProjectDetail in src/server/projects.ts) makes older forks
+ * permanently unreachable through the UI. Fetches the list lazily (only
+ * once opened), same pattern as TopBar's credit-balance fetch. Deliberately
+ * explicit that forks are one-way copies, not real branches: there is no
+ * merge-back in this app (see forkSession's doc comment) — the footer note
+ * exists so users don't discover that the hard way after diverging both
+ * sides.
+ */
+function SessionSwitcher({
+  projectId,
+  currentSessionId,
+  onSwitch,
+}: {
+  projectId: string | null;
+  currentSessionId?: string | null;
+  onSwitch: (sessionId: string, job: { id: string; status: JobStatus } | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+
+  useEffect(() => {
+    if (!open || !projectId) return;
+    let cancelled = false;
+    fetch(`/api/projects/${projectId}/sessions`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { sessions?: SessionSummary[] } | null) => {
+        if (!cancelled && data?.sessions) setSessions(data.sessions);
+      })
+      .catch(() => {
+        // Best-effort — dropdown just shows "Loading…" indefinitely on failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, projectId]);
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger
+        aria-label="Switch version"
+        title="Switch version"
+        disabled={!projectId}
+        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+      >
+        <History className="size-4" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-64">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Versions</DropdownMenuLabel>
+          {sessions === null ? (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">Loading…</div>
+          ) : sessions.length === 0 ? (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">No versions yet</div>
+          ) : (
+            sessions.map((s) => (
+              <DropdownMenuItem
+                key={s.id}
+                onClick={() => onSwitch(s.id, s.job)}
+                className={cn(
+                  "flex flex-col items-start gap-0.5",
+                  s.id === currentSessionId && "bg-secondary/60"
+                )}
+              >
+                <span className="text-xs font-medium">
+                  {s.parentSessionId ? "Fork" : "Original"}
+                  {s.id === currentSessionId ? " (current)" : ""}
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {new Date(s.createdAt).toLocaleString()}
+                </span>
+              </DropdownMenuItem>
+            ))
+          )}
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <div className="px-2 py-1.5 text-[10px] text-muted-foreground">
+          Forks are independent copies — they can&apos;t be merged back automatically.
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+interface DeploymentSummary {
+  id: string;
+  url: string;
+  createdAt: string;
+}
+
+/**
+ * Dropdown listing every past Vercel deploy for this session, newest first
+ * — opening one is just a link (no new deploy). Deliberately a separate
+ * control from the Rocket "Deploy" button next to it: Deploy always creates
+ * a new deployment, this only ever looks at ones that already exist. See
+ * listDeploymentsForSession in src/server/vercel.ts for why history exists
+ * at all instead of just sessions.vercelDeploymentUrl (which only holds the
+ * latest).
+ */
+function DeploymentHistory({ sessionId }: { sessionId?: string | null }) {
+  const [open, setOpen] = useState(false);
+  const [deploymentList, setDeploymentList] = useState<DeploymentSummary[] | null>(null);
+
+  useEffect(() => {
+    if (!open || !sessionId) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${sessionId}/deployments`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { deployments?: DeploymentSummary[] } | null) => {
+        if (!cancelled && data?.deployments) setDeploymentList(data.deployments);
+      })
+      .catch(() => {
+        // Best-effort — dropdown just shows "Loading…" indefinitely on failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, sessionId]);
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger
+        aria-label="View past deployments"
+        title="View past deployments — no new deploy needed"
+        disabled={!sessionId}
+        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+      >
+        <Globe className="size-4" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-64">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Past deployments</DropdownMenuLabel>
+          {deploymentList === null ? (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">Loading…</div>
+          ) : deploymentList.length === 0 ? (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+              No deployments yet — use Deploy to create one.
+            </div>
+          ) : (
+            deploymentList.map((d, i) => (
+              <DropdownMenuItem
+                key={d.id}
+                render={<a href={d.url} target="_blank" rel="noopener noreferrer" />}
+                className="flex flex-col items-start gap-0.5"
+              >
+                <span className="text-xs font-medium">
+                  {i === 0 ? "Latest" : `${deploymentList.length - i} versions back`}
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {new Date(d.createdAt).toLocaleString()}
+                </span>
+              </DropdownMenuItem>
+            ))
+          )}
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <div className="px-2 py-1.5 text-[10px] text-muted-foreground">
+          Opens the live app for that deploy — doesn&apos;t create a new one.
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 // lucide-react dropped brand marks, so the GitHub logo is inlined here.
 function GithubIcon(props: React.SVGProps<SVGSVGElement>) {
@@ -58,7 +243,7 @@ function IconAction({
 }
 
 const SAVE_STATUS_TEXT: Record<
-  Exclude<SaveState, "idle" | "not_connected">,
+  Exclude<SaveState, "idle" | "not_connected" | "needs_reauth">,
   (message: string | null, url: string | null) => string
 > = {
   saving: () => "Saving to GitHub…",
@@ -71,16 +256,21 @@ const DEPLOY_STATUS_TEXT: Record<Exclude<DeployState, "idle">, (message: string 
   deploying: () => "Deploying to Vercel…",
   done: (_message, url) => (url ? `Deployed: ${url}` : "Deployed."),
   error: (message) => message ?? "Failed to deploy to Vercel.",
-  not_configured: (message) => message ?? "Vercel deploy is not configured in this environment.",
+  not_configured: (message) => message ?? "Deploying isn't turned on for this app yet.",
 };
 
 const STATUS_STRIP_CONFIG: Record<
   JobStatus,
   { label: string; dot: string; pulse: boolean }
 > = {
-  running: { label: "Agent is running…", dot: "bg-emerald-500", pulse: true },
+  running: { label: "Agent is running", dot: "bg-emerald-500", pulse: true },
   waiting_on_user: {
-    label: "Agent is waiting…",
+    label: "Agent is waiting",
+    dot: "bg-amber-400",
+    pulse: true,
+  },
+  waiting_on_plan: {
+    label: "Plan ready for review",
     dot: "bg-amber-400",
     pulse: true,
   },
@@ -88,6 +278,23 @@ const STATUS_STRIP_CONFIG: Record<
   stopped: { label: "Agent stopped", dot: "bg-muted-foreground", pulse: false },
   failed: { label: "Agent failed", dot: "bg-red-500", pulse: false },
 };
+
+/** Three-dot "thinking…" indicator, each dot fading in turn — same idea as
+ * Claude's own thinking animation, built from Tailwind's stock animate-pulse
+ * (no custom keyframes needed) staggered per dot via inline animation-delay. */
+function ThinkingDots() {
+  return (
+    <span className="inline-flex items-center gap-0.5" aria-hidden>
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="size-1 animate-pulse rounded-full bg-current"
+          style={{ animationDelay: `${i * 0.2}s` }}
+        />
+      ))}
+    </span>
+  );
+}
 
 function StatusStrip({ jobStatus }: { jobStatus: JobStatus | null }) {
   if (!jobStatus) return null;
@@ -106,6 +313,7 @@ function StatusStrip({ jobStatus }: { jobStatus: JobStatus | null }) {
         <span className={cn("relative inline-flex size-1.5 rounded-full", dot)} />
       </span>
       {label}
+      {pulse && <ThinkingDots />}
     </div>
   );
 }
@@ -119,6 +327,7 @@ export function ChatPanel({
   error,
   hasProject,
   sessionId,
+  projectId = null,
   isForking = false,
   isSendingMessage = false,
   saveState = "idle",
@@ -129,9 +338,11 @@ export function ChatPanel({
   deployUrl = null,
   onSubmitPrompt,
   onAnswerQuestion,
+  onPlanDecision,
   onStop,
   onContinueChat,
   onFork,
+  onSwitchSession,
   onSave,
   onDeploy,
 }: {
@@ -141,6 +352,8 @@ export function ChatPanel({
   error: string | null;
   hasProject: boolean;
   sessionId?: string | null;
+  /** Backs the session-switcher dropdown (SessionSwitcher above). */
+  projectId?: string | null;
   isForking?: boolean;
   isSendingMessage?: boolean;
   saveState?: SaveState;
@@ -151,14 +364,46 @@ export function ChatPanel({
   deployUrl?: string | null;
   onSubmitPrompt: (prompt: string) => void;
   onAnswerQuestion: (toolUseId: string, answers: AnswerItem[]) => void;
+  /** The user's approve/revise response to a `plan` event (PlanCard, via Timeline). */
+  onPlanDecision?: (
+    planEventId: string,
+    action: "approve" | "revise",
+    feedback?: string
+  ) => void;
   onStop: () => void;
-  onContinueChat?: (prompt: string) => void;
+  onContinueChat?: (prompt: string, planMode?: boolean) => void;
   onFork?: () => void;
+  onSwitchSession?: (sessionId: string, job: { id: string; status: JobStatus } | null) => void;
   onSave?: () => void;
   onDeploy?: () => void;
 }) {
   const [message, setMessage] = useState("");
+  // Only meaningful for a follow-up message (a brand-new project always
+  // plans regardless of this) — lets the user opt a specific edit into the
+  // full Opus-plan -> approve -> Sonnet-build pipeline instead of today's
+  // direct-edit default. See src/server/agent.ts's runContinuationFlow.
+  const [planMode, setPlanMode] = useState(false);
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+  // Text already in the composer when listening starts — interim/final
+  // speech results are appended after this, not appended to each other, so
+  // a still-updating interim result doesn't compound on itself.
+  const dictationBaseRef = useRef("");
+  const { isSupported: isVoiceSupported, isListening, start, stop } =
+    useSpeechRecognition((transcript, isFinal) => {
+      const base = dictationBaseRef.current;
+      const next = base && transcript ? `${base} ${transcript}` : base || transcript;
+      setMessage(next);
+      if (isFinal) dictationBaseRef.current = next;
+    });
+
+  function handleMicClick() {
+    if (isListening) {
+      stop();
+      return;
+    }
+    dictationBaseRef.current = message;
+    start();
+  }
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ block: "end" });
@@ -176,7 +421,7 @@ export function ChatPanel({
     const trimmed = message.trim();
     if (!trimmed || composerDisabled) return;
     if (hasProject) {
-      onContinueChat?.(trimmed);
+      onContinueChat?.(trimmed, planMode);
     } else {
       onSubmitPrompt(trimmed);
     }
@@ -190,8 +435,12 @@ export function ChatPanel({
     }
   }
 
-  const isActive = jobStatus === "running" || jobStatus === "waiting_on_user";
+  const isActive =
+    jobStatus === "running" ||
+    jobStatus === "waiting_on_user" ||
+    jobStatus === "waiting_on_plan";
   const answersDisabled = jobStatus !== "waiting_on_user";
+  const planDisabled = jobStatus !== "waiting_on_plan";
 
   return (
     <aside className="flex h-full min-h-0 w-[440px] shrink-0 flex-col border-r border-border bg-background">
@@ -215,7 +464,9 @@ export function ChatPanel({
             <Timeline
               events={events}
               onAnswerQuestion={onAnswerQuestion}
+              onPlanDecision={onPlanDecision}
               disabled={answersDisabled}
+              planDisabled={planDisabled}
               sessionId={sessionId}
             />
             <div ref={scrollAnchorRef} />
@@ -232,11 +483,15 @@ export function ChatPanel({
         )}
         <StatusStrip jobStatus={jobStatus} />
 
-        {saveState === "not_connected" ? (
+        {saveState === "not_connected" || saveState === "needs_reauth" ? (
           <div className="mb-2 flex items-center justify-between gap-2 rounded-md bg-secondary/60 px-2.5 py-1.5 text-xs text-muted-foreground">
-            <span>Connect your GitHub account to save this project.</span>
+            <span>
+              {saveState === "needs_reauth"
+                ? "Reconnect GitHub and accept the authorization prompt to create this repo."
+                : "Connect your GitHub account to save this project."}
+            </span>
             <a
-              href="/api/github/connect"
+              href={saveState === "needs_reauth" ? "/api/github/reauthorize" : "/api/github/connect"}
               className="shrink-0 rounded-md bg-foreground px-2 py-1 text-xs font-medium text-background transition-colors hover:bg-foreground/80"
             >
               Connect GitHub
@@ -304,14 +559,59 @@ export function ChatPanel({
                 onClick={onFork}
                 disabled={!hasProject || !onFork || isForking}
               />
+              {onSwitchSession && (
+                <SessionSwitcher
+                  projectId={projectId}
+                  currentSessionId={sessionId}
+                  onSwitch={onSwitchSession}
+                />
+              )}
               <IconAction
                 icon={<Rocket className="size-4" />}
-                label="Deploy"
+                label="Deploy a new version"
                 onClick={onDeploy}
                 disabled={!hasProject || !onDeploy || deployState === "deploying"}
               />
-              <IconAction icon={<Mic className="size-4" />} label="Voice input" />
+              <DeploymentHistory sessionId={sessionId} />
+              <IconAction
+                icon={
+                  <Mic
+                    className={cn("size-4", isListening && "text-red-500")}
+                  />
+                }
+                label={
+                  isVoiceSupported
+                    ? isListening
+                      ? "Listening… click to stop"
+                      : "Voice input"
+                    : "Voice input isn't supported in this browser"
+                }
+                onClick={handleMicClick}
+                disabled={!isVoiceSupported || composerDisabled}
+              />
             </div>
+            {canContinueChat && (
+              <Tooltip>
+                <TooltipTrigger
+                  aria-label="Toggle Plan mode"
+                  onClick={() => setPlanMode((prev) => !prev)}
+                  disabled={composerDisabled}
+                  className={cn(
+                    "flex items-center gap-1 rounded-full border px-2 py-1 text-[0.7rem] font-medium transition-colors disabled:pointer-events-none disabled:opacity-40",
+                    planMode
+                      ? "border-emerald-500 bg-emerald-500/10 text-emerald-400"
+                      : "border-border text-muted-foreground hover:bg-secondary"
+                  )}
+                >
+                  {planMode ? "Plan" : "Build"}
+                </TooltipTrigger>
+                <TooltipContent>
+                  {planMode
+                    ? "This message will be planned (Opus) and shown for approval before anything is built."
+                    : "This message will be built directly. Toggle to Plan mode to review a plan first."}
+                </TooltipContent>
+              </Tooltip>
+            )}
             {isActive ? (
               <Tooltip>
                 <TooltipTrigger

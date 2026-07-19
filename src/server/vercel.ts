@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { sessions } from "@/db/schema";
+import { deployments, sessions } from "@/db/schema";
 import { getSessionFiles } from "@/server/files";
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,39 @@ async function getSessionWithProject(sessionId: string) {
   const db = getDb();
   const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
   return row ?? null;
+}
+
+/**
+ * New projects inherit the team/account's default Deployment Protection —
+ * for most accounts that's Vercel Authentication on every deployment
+ * without a custom domain, which is exactly every `*.vercel.app` URL this
+ * app hands back to a user. Left on, "Deploy" produces a link that dead-ends
+ * at a Vercel login wall instead of the live app, defeating the whole
+ * point. Best-effort and non-fatal: the deployment itself already succeeded
+ * by the time this runs, so a failure here (e.g. a token without project
+ * write scope) logs and gets swallowed rather than failing the deploy the
+ * user is currently waiting on.
+ */
+async function disableDeploymentProtection(projectName: string): Promise<void> {
+  try {
+    const res = await fetch(vercelApiUrl(`/v9/projects/${projectName}`), {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${process.env.VERCEL_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ssoProtection: null }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const message =
+        (body as { error?: { message?: string } })?.error?.message ??
+        `status ${res.status}`;
+      console.error(`[vercel] failed to disable deployment protection for ${projectName}: ${message}`);
+    }
+  } catch (err) {
+    console.error(`[vercel] failed to disable deployment protection for ${projectName}`, err);
+  }
 }
 
 /**
@@ -97,8 +130,36 @@ export async function deploySessionToVercel(sessionId: string): Promise<{ url: s
   const data = (await res.json()) as VercelDeploymentResponse;
   const url = `https://${data.url}`;
 
+  await disableDeploymentProtection(projectName);
+
   const db = getDb();
   await db.update(sessions).set({ vercelDeploymentUrl: url }).where(eq(sessions.id, sessionId));
+  await db.insert(deployments).values({ sessionId, url });
 
   return { url };
+}
+
+export interface DeploymentSummary {
+  id: string;
+  url: string;
+  createdAt: Date;
+}
+
+/**
+ * Full deploy history for a session, newest first — backs the Deployments
+ * dropdown (view any past deploy, no new deploy needed) as distinct from
+ * the Deploy button (always creates a new one). See the `deployments` table
+ * comment in src/db/schema.ts for why this exists alongside
+ * sessions.vercelDeploymentUrl, which only ever holds the latest.
+ */
+export async function listDeploymentsForSession(
+  sessionId: string
+): Promise<DeploymentSummary[]> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(deployments)
+    .where(eq(deployments.sessionId, sessionId))
+    .orderBy(desc(deployments.createdAt));
+  return rows.map((r) => ({ id: r.id, url: r.url, createdAt: r.createdAt }));
 }

@@ -14,40 +14,60 @@ import { getJob, setAgentSessionId, setJobStatus } from "@/server/jobs";
 import { sandboxProvider, seedSandboxTemplate } from "@/server/sandbox";
 import { getSessionFiles, snapshotSessionFiles } from "@/server/files";
 import { debitForJobUsage } from "@/server/credits";
+import { getProjectAgentContext } from "@/server/projects";
 import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
-// Phase 1 (scoping) + Phase 2 (build) agent loop.
+// Multi-agent orchestration: Plan (Opus) -> user approves/revises -> Build
+// (Sonnet) -> Review (Sonnet) -> Debug (Sonnet, only if review found issues).
 //
-// First turn: the model is instructed (and given exactly one tool) to call
-// `ask_user` with 3-5 clarifying questions. Once the user answers, the model
-// writes a short build plan as text; the harness (not the model) then emits
-// a few whimsical status lines and a closing summary. Phase 2 extends this:
-// instead of stopping there, the harness starts a real local sandbox
-// (src/server/sandbox.ts) for the job's session and runs a second query()
-// call with real Bash/Read/Write/Edit/Glob/Grep tools, `cwd`'d into that
-// sandbox directory, to actually build the app. See runBuildPhase below.
+// PLANNING: the planner (claude-opus-4-8) asks clarifying questions via the
+// same ask_user tool as before, then writes a build plan. Instead of
+// silently continuing to build, the harness now appends a `plan` event and
+// pauses the job (status "waiting_on_plan") until the user approves or
+// requests changes (POST /api/jobs/[id]/plan) — same "block inside a
+// long-lived harness loop, poll the events table" shape as ask_user's
+// waitForAnswer, just driven by the harness (runPlanningPhase) rather than
+// from inside a tool handler, since writing a plan isn't itself a tool call.
+// A "revise" decision loops back into another planner call with the user's
+// feedback folded in, capped at MAX_PLAN_REVISIONS.
+//
+// BUILD: unchanged mechanically from before — the builder (claude-sonnet-5)
+// gets real Bash/Read/Write/Edit/Glob/Grep, `cwd`'d into the session's
+// sandbox.
+//
+// REVIEW + DEBUG (new): once the builder finishes, a review pass (also
+// claude-sonnet-5 — Opus is reserved for planning only, confirmed) reads the
+// resulting code (Read/Grep/Glob/Bash, no writes) and reports structured
+// findings via a custom `report_review` tool (same pattern as ask_user).
+// Only if it found real issues does a debug pass run (same tools as build)
+// to fix them, then the sandbox gets re-snapshotted. A clean review skips
+// the debug pass entirely — no wasted call on a build with nothing wrong.
+//
+// This whole pipeline is FORCED on a brand-new project's first build (as
+// scoping always was). For a follow-up message on an already-built session,
+// the default stays today's direct-to-build edit (CONTINUATION_PLAN_TEXT,
+// no planning gate) — but the user can opt a specific message into the full
+// Plan -> Approve -> Build pipeline via a `planMode` flag riding on that
+// job's `user_message` event payload (no new DB column — same "derive from
+// existing state" philosophy as the existingFiles.length check below that
+// already distinguishes fresh builds from continuations). Either way, once
+// a build happens, the new Review(+Debug) tail always runs.
 //
 // REAL RUNTIME: the "real" (non-mock) path runs on the Claude Agent SDK
 // (`@anthropic-ai/claude-agent-sdk`), which wraps the local `claude` CLI and
 // authenticates with whatever the CLI is already logged in as (Claude Code
-// subscription auth) — no ANTHROPIC_API_KEY needed for local dev. Deploying
-// this to a hosted environment later needs its own auth story for the CLI;
-// that's out of scope here.
+// subscription auth) — no ANTHROPIC_API_KEY needed for local dev.
 //
 // The `ask_user` tool is a custom in-process SDK MCP tool: when the model
 // calls it, the handler appends the tool_call + question events, flips the
 // job to waiting_on_user, and then BLOCKS — polling the events table for an
-// `answer` event — until the user responds via POST /messages. This means
-// the entire scoping conversation (ask_user -> plan text) happens inside one
-// long-lived query() call per job, spanning the human's wait. That call
+// `answer` event — until the user responds via POST /messages. That call
 // only lives in this process, so if the dev server restarts mid-run the job
-// orphans — same accepted Phase 1 limitation documented in src/server/jobs.ts.
-// The same `ask_user` tool stays registered (but not required) during the
-// Phase 2 build query, in case the model genuinely needs to ask something
-// the scoping answers didn't cover.
+// orphans — an accepted limitation (documented in src/server/jobs.ts), and
+// the same applies to a job parked in waitForPlanDecision.
 //
-// KNOWN RESIDUAL RISK (Phase 2, accepted — not solved here): the build
+// KNOWN RESIDUAL RISK (build/review/debug, accepted — not solved here): the
 // query's `cwd` scopes where its Bash tool *starts*, not a hard filesystem
 // jail. The model could `cd` or use an absolute path to touch things outside
 // the sandbox directory. This is a single-user local dev tool, not a
@@ -55,46 +75,94 @@ import type { AnswerItem, Question } from "@/lib/types";
 // of scope for this phase.
 //
 // MOCK MODE: if MOCK_AGENT=1, we run a scripted trajectory with identical
-// event shapes so the whole system is verifiable without any model calls at
-// all. The mock loop stops at "scoping done" (Phase 1 behavior) — it does
-// not simulate a build phase.
+// event shapes (including a scripted plan step) so the whole system is
+// verifiable without any model calls at all. The mock loop stops once the
+// scripted plan is approved — it does not simulate a real build.
 // ---------------------------------------------------------------------------
 
-const MODEL = "claude-sonnet-5";
+const PLANNER_MODEL = "claude-opus-4-8";
+const BUILDER_MODEL = "claude-sonnet-5"; // build, review, and debug — always
+
 const MAX_ITERATIONS = 15;
+const MAX_PLAN_REVISIONS = 5;
 const ANSWER_POLL_INTERVAL_MS = 800;
 
-// Build phase gets a much larger iteration budget than scoping — it's
+// Build phase gets a much larger iteration budget than planning — it's
 // actually writing/editing files and running commands, not just asking a
-// handful of questions.
+// handful of questions or reading over what's already there.
 const BUILD_MAX_ITERATIONS = 60;
+const REVIEW_MAX_ITERATIONS = 20;
+const DEBUG_MAX_ITERATIONS = 40;
 
 // Explicit allowlist (checked against node_modules/@anthropic-ai/claude-agent-sdk
 // sdk.d.ts's `Options.tools` — `string[] | { type: 'preset'; preset: 'claude_code' }`)
-// rather than the `claude_code` preset, so the build phase gets exactly the
-// file/shell tools it needs and nothing else (no WebFetch/WebSearch/Task/...).
+// rather than the `claude_code` preset, so each phase gets exactly the tools
+// it needs and nothing else (no WebFetch/WebSearch/Task/...).
 const BUILD_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"];
+// Review is read-only by design (plus Bash, so it can run a real compile
+// check like `npm run build` rather than guessing from source alone) — no
+// Write/Edit, since reviewing and fixing are deliberately separate passes.
+const REVIEW_TOOLS = ["Bash", "Read", "Glob", "Grep"];
 
 const BUILD_SYSTEM_PROMPT = `You are the build agent inside an Emergent-style AI app builder. You already scoped this app with the user in an earlier turn — you have their answers and you already wrote a build plan. You do not need to ask them anything else; build directly.
 
 Your working directory already contains a minimal Next.js (App Router) + Tailwind starter template — package.json, app/layout.tsx, app/page.tsx, tailwind/postcss config. A real \`npm run dev\` dev server for this directory is already running and being live-previewed, so:
 - Edit the existing files and add new ones to build the actual app described in the plan and the user's answers.
-- Keep \`npm run dev\` working — don't leave the app in a state that fails to compile. Feel free to use Bash to sanity-check (e.g. \`npm run build\`) if you're unsure.
+- Keep \`npm run dev\` working — don't leave the app in a state that fails to compile. Feel free to use Bash to sanity-check (e.g. \`npm run build\`) if you're unsure. Known false positive: this template's \`npm run build\` can fail to statically prerender a \`/_global-error\` route even when the app is completely fine — that's a pre-existing quirk of the starter template, not something you caused; don't spend time chasing it if you see it.
 - If you need an additional npm package, install it yourself via Bash (\`npm install <package>\`).
 - Keep changes scoped to what was actually asked for — don't build unrelated features.
 - Do not run any command or read/write any file outside this working directory.
 
+The user's message may be a build/edit instruction, a plain question about the project (e.g. "is my GitHub connected?", "has this been deployed?", "how many credits do I have left?"), or both. Your prompt includes a "Project context" block with the real, current answers to exactly that kind of question — use it to answer directly instead of guessing from sandbox files (they don't contain account/connector state) or claiming you have no way to know. Only touch files when the message actually asks for a build/edit.
+
 Never reference the identity, email address, or account details of whoever is authenticated on the underlying CLI session.`;
 
-const SYSTEM_PROMPT = `You are the build agent inside an Emergent-style AI app builder. A user just described an app they want built in a chat box.
+const SYSTEM_PROMPT = `You are the planning agent inside an Emergent-style AI app builder. A user just described an app they want built in a chat box.
 
-Your job in this phase is ONLY to scope the work — you do not write or run any code yet (that capability arrives in a later phase). You have exactly one tool available, named ask_user; you have no filesystem, shell, or web access.
+Your job in this phase is ONLY to scope the work and write a plan — a separate builder agent writes the actual code in a later phase. You have exactly one tool available, named ask_user; you have no filesystem, shell, or web access.
 
 Never reference the identity, email address, or account details of whoever is authenticated on the underlying CLI session — you are building an app for an end user you know nothing about, not for the operator of this environment. Do not suggest "use my email X" or similar as an answer option.
 
 On your very first turn you MUST call the ask_user tool with 3-5 short clarifying questions about the app (e.g. target platform, data model, auth, must-have features, design style). Give each question 2-6 concrete suggested options.
 
-After the user answers, write a short build plan (4-8 concise bullet points, plain text, no code) summarizing what you will build, directly informed by their answers.`;
+After the user answers, write a short build plan (4-8 concise bullet points, plain text, no code) summarizing what you will build, directly informed by their answers. The user will review this plan and may ask you to change it before anything gets built.`;
+
+/**
+ * Used for every revision pass (fresh-build or continuation), regardless of
+ * which system prompt produced the original plan — the ask_user tool stays
+ * registered but the model is told to use it sparingly, since the point of
+ * a revision is usually just "apply this feedback", not re-scope from zero.
+ */
+const PLAN_REVISION_SYSTEM_PROMPT = `You are the planning agent inside an Emergent-style AI app builder. You already wrote a build plan and the user has asked for changes to it.
+
+You have exactly one tool available, ask_user — only use it if the requested change is genuinely ambiguous in a way that risks doing the wrong thing; most revision requests can be applied directly without asking anything.
+
+Write a revised build plan (4-8 concise bullet points, plain text, no code) that actually incorporates the requested changes — don't just repeat the previous plan.`;
+
+/**
+ * Continuation ("keep chatting") planning, only used when the user opts a
+ * follow-up message into Plan mode — adapts CONTINUATION_PLAN_TEXT's "this
+ * is an edit, not a fresh build" framing into a planning-phase prompt.
+ */
+const CONTINUATION_PLANNING_SYSTEM_PROMPT = `You are the planning agent inside an Emergent-style AI app builder. This is a follow-up request against an app that already exists and is running in a working directory you don't have access to yet — it is NOT a fresh build.
+
+You have exactly one tool available, ask_user — only use it if the request is genuinely ambiguous in a way that risks doing the wrong thing; for a straightforward request, don't ask anything and go straight to writing the plan.
+
+Write a short edit plan (2-6 concise bullet points, plain text, no code) describing exactly what you will change, directly informed by the user's request. The user will review this plan and may ask you to change it before anything gets built.`;
+
+const REVIEW_SYSTEM_PROMPT = `You are the code review agent inside an Emergent-style AI app builder. Another agent just built or edited the app in this working directory.
+
+Inspect the actual code — read the files that were touched, check they're internally consistent. Look for real, concrete problems: broken imports, mismatched types, obviously wrong logic, a component referencing a file that doesn't exist. Do not nitpick style or invent hypothetical issues — only report things that would actually break or visibly misbehave.
+
+Known false positive, do not chase this: this template's \`npm run build\` can fail to statically prerender a \`/_global-error\` route even when the app itself is completely fine — that is a pre-existing quirk of this starter template, not something caused by the edit you're reviewing. If you see it, ignore it; it is not a reportable issue. Checking that the actual page(s) touched by the edit render correctly (one curl/fetch against the already-running dev server is enough) is far more informative here than a full \`npm run build\`.
+
+Be decisive and efficient — you are not debugging, you are forming a verdict. A couple of Read/Grep calls plus at most one quick check against the running dev server is normally enough. Do not spin up additional dev servers on other ports, do not repeatedly rerun the same check, and do not keep digging once you have a reasonably confident answer. Call report_review as soon as you're confident either way — a review that runs out of turns without calling it is a worse outcome than a slightly less thorough one that does.
+
+You have Bash/Read/Glob/Grep tools. You have exactly one other tool, report_review — call it exactly once, at the end, with your findings. Do not edit any files; you are reviewing, not fixing.`;
+
+const DEBUG_SYSTEM_PROMPT = `You are the debugging agent inside an Emergent-style AI app builder. A code review just found issues in this working directory that need fixing.
+
+Fix each issue listed in your prompt. Read whatever files you need to understand the problem before changing anything. Keep \`npm run dev\` working — sanity-check with \`npm run build\` via Bash if you're unsure. Keep changes scoped to fixing the reported issues; do not refactor or add unrelated features.`;
 
 const WHIMSICAL_STATUS_LINES = [
   "Making things click…",
@@ -140,7 +208,7 @@ const MOCK_PLAN_TEXT = `Here's the plan:
 - Leave room to iterate once you see the first working version`;
 
 const MOCK_SUMMARY_TEXT =
-  "Scoping is complete — I have what I need to start building. Real code generation lands in the next phase; for now this job is done.";
+  "Scoping is complete — I have what I need to start building. Real code generation lands in a later phase; for now this job is done.";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -151,23 +219,23 @@ function isMockMode(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4 (Half A, REAL): production credential swap point.
+// Production credential swap point.
 //
 // Returns `undefined` when ANTHROPIC_API_KEY is not set in the server's own
 // process environment — the SDK's `query()` then omits `options.env`
 // entirely, so the subprocess inherits this process's shell environment and
 // falls through to the local `claude` CLI's own login (Claude Code
 // subscription auth). This is the default, always-tested path in this
-// environment and MUST behave identically to Phase 1-3: no ANTHROPIC_API_KEY
-// is set here, so every call site below passes `env: getAgentEnv()` ===
-// `env: undefined`, which is exactly what those call sites did before this
-// function existed (they simply didn't set `env` at all).
+// environment: no ANTHROPIC_API_KEY is set here, so every call site below
+// passes `env: getAgentEnv()` === `env: undefined`, which is exactly what
+// those call sites did before this function existed (they simply didn't set
+// `env` at all).
 //
 // Returns `{ ...process.env, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }`
 // only once a real, centrally-held key is configured for a production
-// deploy — see PLAN.md's Phase 4 section. No other code changes are needed
-// to swap credential sources: this is the one function a production
-// deployment's ops config needs to make true.
+// deploy. No other code changes are needed to swap credential sources: this
+// is the one function a production deployment's ops config needs to make
+// true.
 // ---------------------------------------------------------------------------
 function getAgentEnv(): Record<string, string | undefined> | undefined {
   if (!process.env.ANTHROPIC_API_KEY) return undefined;
@@ -175,25 +243,26 @@ function getAgentEnv(): Record<string, string | undefined> | undefined {
 }
 
 /**
- * Appends a `usage` event (unchanged shape from Phase 1) and, right after,
- * debits the job owner's credit ledger for that usage — see
- * src/server/credits.ts for the cost model. Centralizes the three call
- * sites below so scoping/summary/build queries can't drift out of sync with
- * each other.
+ * Appends a `usage` event and, right after, debits the job owner's credit
+ * ledger for that usage — see src/server/credits.ts for the cost model.
+ * Centralizes every call site so they can't drift out of sync with each
+ * other. Takes the actual model used for this call (planner vs builder use
+ * different, differently-priced models) rather than assuming one flat rate.
  */
 async function recordUsage(
   jobId: string,
   step: string,
+  model: string,
   inputTokens: number,
   outputTokens: number
 ): Promise<void> {
   await appendEvent(jobId, "system", "usage", {
-    model: MODEL,
+    model,
     inputTokens,
     outputTokens,
     step,
   });
-  await debitForJobUsage(jobId, step, inputTokens, outputTokens);
+  await debitForJobUsage(jobId, step, model, inputTokens, outputTokens);
 }
 
 // Prevents a duplicate concurrent run of the same job within this process
@@ -271,20 +340,38 @@ async function runMockLoop(jobId: string): Promise<void> {
 
   if (countUnansweredQuestions(allEvents) > 0) return; // still waiting
 
-  const hasPlan = allEvents.some((e) => e.type === "assistant_message");
-  if (hasPlan) return; // already progressed past planning
+  const hasPlan = allEvents.some((e) => e.type === "plan");
+  if (!hasPlan) {
+    const planEventId = "mock-plan-1";
+    await appendEvent(jobId, "assistant", "assistant_message", {
+      text: MOCK_PLAN_TEXT,
+    });
 
-  await appendEvent(jobId, "assistant", "assistant_message", {
-    text: MOCK_PLAN_TEXT,
-  });
+    for (const line of WHIMSICAL_STATUS_LINES) {
+      if (await isStopped(jobId)) return;
+      await appendEvent(jobId, "assistant", "status", { text: line });
+      await sleep(900);
+    }
 
-  for (const line of WHIMSICAL_STATUS_LINES) {
     if (await isStopped(jobId)) return;
-    await appendEvent(jobId, "assistant", "status", { text: line });
-    await sleep(900);
+    await appendEvent(jobId, "assistant", "plan", {
+      id: planEventId,
+      text: MOCK_PLAN_TEXT,
+      revision: 0,
+    });
+    await setJobStatus(jobId, "waiting_on_plan");
+    return;
   }
 
-  if (await isStopped(jobId)) return;
+  const latestPlan = [...allEvents].reverse().find((e) => e.type === "plan");
+  const planEventId = (latestPlan?.payload as { id?: string } | undefined)?.id;
+  const decision = allEvents.find(
+    (e) =>
+      e.type === "plan_decision" &&
+      (e.payload as { planEventId?: string }).planEventId === planEventId
+  );
+  if (!decision) return; // still waiting on the plan decision
+
   await appendEvent(jobId, "assistant", "assistant_message", {
     text: MOCK_SUMMARY_TEXT,
   });
@@ -312,7 +399,29 @@ function formatAnswersAsToolResult(answers: AnswerItem[]): string {
   return answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n");
 }
 
-/** Per-job scratch directory used as the query's `cwd` — never the real project root. */
+/**
+ * Renders the DB-backed facts a chat message might ask about (GitHub
+ * connection, last deploy, credit balance) as plain text for the build
+ * prompt — see getProjectAgentContext in src/server/projects.ts for where
+ * this data actually comes from. `null` (session/project vanished between
+ * the job starting and this lookup) degrades to an explicit "unavailable"
+ * line rather than silently omitting the block.
+ */
+function formatProjectContextBlock(
+  context: Awaited<ReturnType<typeof getProjectAgentContext>>
+): string {
+  if (!context) {
+    return "Project context: unavailable for this session.";
+  }
+  return `Project context (answers to meta-questions about this project/account — not build instructions):
+- Project: ${context.projectName} (${context.projectSlug})
+- GitHub: ${context.githubConnected ? "connected" : "not connected"}
+- Last saved to GitHub: ${context.githubRepoUrl ?? "never saved"}
+- Last deployed (Vercel): ${context.vercelDeploymentUrl ?? "never deployed"}
+- Credit balance: ${context.creditBalance} credits`;
+}
+
+/** Per-job scratch directory used as the planning query's `cwd` — never the real project root. */
 function ensureJobScratchDir(jobId: string): string {
   const dir = join(tmpdir(), "emergent-agent-jobs", jobId);
   mkdirSync(dir, { recursive: true });
@@ -401,9 +510,9 @@ function buildAskUserTool(jobId: string) {
   );
 }
 
-function describeResultError(message: SDKResultError): string {
+function describeResultError(message: SDKResultError, maxTurns: number): string {
   if (message.subtype === "error_max_turns") {
-    return `Reached the maximum of ${MAX_ITERATIONS} agent iterations for this job.`;
+    return `Reached the maximum of ${maxTurns} agent iterations for this job.`;
   }
   if (message.subtype === "error_max_budget_usd") {
     return "Reached the maximum budget for this job.";
@@ -414,15 +523,23 @@ function describeResultError(message: SDKResultError): string {
   return `Agent run failed (${message.subtype}).`;
 }
 
-/**
- * The whole scoping conversation — ask_user, the block-until-answered wait,
- * and the resulting plan text — happens inside this single query() call.
- * Only the `ask_user` MCP tool is exposed; every built-in tool
- * (Bash/Read/Write/Edit/WebFetch/…) is disabled via `tools: []`, and `cwd`
- * points at a throwaway scratch directory as defense in depth.
- */
-async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
-  const cwd = ensureJobScratchDir(jobId);
+// ---------------------------------------------------------------------------
+// Planning phase (claude-opus-4-8): ask_user Q&A (first pass only, unless
+// the caller says otherwise) -> plan text -> user approve/revise gate.
+// ---------------------------------------------------------------------------
+
+interface PlanQueryResult {
+  planText: string;
+  askUserCalled: boolean;
+}
+
+/** One planner query() call — either the initial scoping pass or a single revision pass. */
+async function runPlanQuery(
+  jobId: string,
+  cwd: string,
+  systemPrompt: string,
+  userPrompt: string
+): Promise<PlanQueryResult> {
   const emergentServer = createSdkMcpServer({
     name: "emergent",
     version: "1.0.0",
@@ -430,12 +547,12 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
   });
 
   const q = query({
-    prompt,
+    prompt: userPrompt,
     options: {
-      model: MODEL,
+      model: PLANNER_MODEL,
       cwd,
       env: getAgentEnv(),
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt,
       maxTurns: MAX_ITERATIONS,
       tools: [], // no built-in tools at all (no Bash/Read/Write/Edit/WebFetch/...)
       mcpServers: { emergent: emergentServer },
@@ -448,15 +565,12 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
 
   let askUserCalled = false;
   let sessionId: string | undefined;
-  // Accumulates the plan text the model writes after the user answers, so
-  // the Phase 2 build query below has a concrete plan to work from instead
-  // of just the raw prompt.
   const planTextParts: string[] = [];
 
   for await (const message of q) {
     if (await isStopped(jobId)) {
       q.close();
-      return;
+      return { planText: "", askUserCalled };
     }
 
     if (message.type === "assistant") {
@@ -484,63 +598,138 @@ async function runScopingQuery(jobId: string, prompt: string): Promise<void> {
       sessionId = message.session_id;
       await recordUsage(
         jobId,
-        "scoping_query",
+        "plan_query",
+        PLANNER_MODEL,
         message.usage.input_tokens,
         message.usage.output_tokens
       );
 
       if (message.subtype !== "success") {
         await appendEvent(jobId, "system", "error", {
-          message: describeResultError(message),
+          message: describeResultError(message, MAX_ITERATIONS),
         });
         await setJobStatus(jobId, "failed");
         if (sessionId) await setAgentSessionId(jobId, sessionId);
-        return;
+        return { planText: "", askUserCalled };
       }
     }
   }
 
   if (sessionId) await setAgentSessionId(jobId, sessionId);
-  if (await isStopped(jobId)) return;
-
-  if (!askUserCalled) {
-    await appendEvent(jobId, "system", "error", {
-      message: "Agent did not call ask_user during the scoping turn.",
-    });
-    await setJobStatus(jobId, "failed");
-    return;
-  }
-
-  // Whimsical status effects are scripted by the harness (not the model).
-  for (const line of WHIMSICAL_STATUS_LINES) {
-    if (await isStopped(jobId)) return;
-    await appendEvent(jobId, "assistant", "status", { text: line });
-    await sleep(700);
-  }
-
-  if (await isStopped(jobId)) return;
-
-  await runSummaryQuery(jobId, cwd);
-  if (await isStopped(jobId)) return;
-
-  const job = await getJob(jobId);
-  if (!job) return;
-
-  await runBuildPhase(jobId, job.sessionId, prompt, planTextParts.join("\n\n"));
+  return { planText: planTextParts.join("\n\n"), askUserCalled };
 }
 
 /**
- * Second, short query() call for the closing (scoping -> build transition)
+ * Polls for the `plan_decision` event matching a specific `plan` event's id
+ * — same ~800ms poll shape as waitForAnswer, but called directly from the
+ * harness loop (runPlanningPhase) rather than from inside a tool handler,
+ * since writing a plan isn't itself a tool call the way ask_user is.
+ */
+async function waitForPlanDecision(
+  jobId: string,
+  planEventId: string
+): Promise<{ action: "approve" | "revise"; feedback?: string } | null> {
+  while (true) {
+    if (await isStopped(jobId)) return null;
+
+    const allEvents = await getAllEvents(jobId);
+    const decisionEvent = allEvents.find(
+      (e) =>
+        e.type === "plan_decision" &&
+        (e.payload as { planEventId?: string }).planEventId === planEventId
+    );
+    if (decisionEvent) {
+      return decisionEvent.payload as { action: "approve" | "revise"; feedback?: string };
+    }
+
+    await sleep(ANSWER_POLL_INTERVAL_MS);
+  }
+}
+
+/**
+ * Runs the planner (possibly several revision rounds) until the user
+ * approves a plan, and returns that plan's text — or null if the job was
+ * stopped, failed, or hit the revision cap (all of which already recorded
+ * their own error/status; the caller should just return).
+ */
+async function runPlanningPhase(
+  jobId: string,
+  cwd: string,
+  initialSystemPrompt: string,
+  initialUserPrompt: string,
+  requireAskUserFirstPass: boolean
+): Promise<string | null> {
+  let systemPrompt = initialSystemPrompt;
+  let userPrompt = initialUserPrompt;
+  let revision = 0;
+  let requireAskUser = requireAskUserFirstPass;
+
+  while (true) {
+    const result = await runPlanQuery(jobId, cwd, systemPrompt, userPrompt);
+    if (await isStopped(jobId)) return null;
+    if (!result.planText) return null; // failure already recorded by runPlanQuery
+
+    if (requireAskUser && !result.askUserCalled) {
+      await appendEvent(jobId, "system", "error", {
+        message: "Agent did not call ask_user during the planning turn.",
+      });
+      await setJobStatus(jobId, "failed");
+      return null;
+    }
+    requireAskUser = false; // only enforced on the very first planning pass
+
+    const planEventId = randomUUID();
+    await appendEvent(jobId, "assistant", "plan", {
+      id: planEventId,
+      text: result.planText,
+      revision,
+    });
+    await setJobStatus(jobId, "waiting_on_plan");
+
+    const decision = await waitForPlanDecision(jobId, planEventId);
+    if (decision === null) return null; // stopped
+
+    if (decision.action === "approve") {
+      return result.planText;
+    }
+
+    revision += 1;
+    if (revision > MAX_PLAN_REVISIONS) {
+      await appendEvent(jobId, "system", "error", {
+        message: `Reached the maximum of ${MAX_PLAN_REVISIONS} plan revisions for this job.`,
+      });
+      await setJobStatus(jobId, "failed");
+      return null;
+    }
+
+    if (await isStopped(jobId)) return null;
+    await setJobStatus(jobId, "running");
+
+    systemPrompt = PLAN_REVISION_SYSTEM_PROMPT;
+    userPrompt = `Original request: ${initialUserPrompt}
+
+Previous plan:
+${result.planText}
+
+The user asked for these changes: ${decision.feedback?.trim() || "(no specific feedback given — use your best judgement about what to change)"}
+
+Write a revised plan.`;
+  }
+}
+
+/**
+ * Second, short query() call for the closing (plan -> build transition)
  * summary — same tool-restricted, filesystem-isolated configuration as the
- * scoping query, but with no tools at all (not even ask_user). Does not set
- * job status; the build phase that follows owns the terminal status.
+ * planning query, but with no tools at all (not even ask_user). Runs on the
+ * planner model since it's narrating the plan, not writing code. Does not
+ * set job status; the build phase that follows owns the terminal status.
  */
 async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
   const q = query({
     prompt:
-      "The scoping phase is complete. Write a brief (2-3 sentence) closing summary for the user of what you'll build next. Plain text only — no code, no tool calls.",
+      "The plan has been approved. Write a brief (2-3 sentence) closing summary for the user of what you'll build next. Plain text only — no code, no tool calls.",
     options: {
-      model: MODEL,
+      model: PLANNER_MODEL,
       cwd,
       env: getAgentEnv(),
       systemPrompt: SYSTEM_PROMPT,
@@ -570,11 +759,12 @@ async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
       await recordUsage(
         jobId,
         "summary_query",
+        PLANNER_MODEL,
         message.usage.input_tokens,
         message.usage.output_tokens
       );
       if (message.subtype !== "success") {
-        throw new Error(describeResultError(message));
+        throw new Error(describeResultError(message, 1));
       }
     }
   }
@@ -582,106 +772,21 @@ async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
   if (await isStopped(jobId)) return;
 
   await appendEvent(jobId, "assistant", "assistant_message", {
-    text: summaryText.trim() || "Scoping complete — starting the build now.",
+    text: summaryText.trim() || "Plan approved — starting the build now.",
   });
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: build phase — real sandbox + real Bash/Read/Write/Edit/Glob/Grep
+// Build phase — real sandbox + real Bash/Read/Write/Edit/Glob/Grep
 // ---------------------------------------------------------------------------
-
-/**
- * Starts the session's sandbox (template seed + npm install + `npm run dev`,
- * see src/server/sandbox.ts), runs the real build query() against it, then
- * snapshots the sandbox directory into the `files` table. Owns the job's
- * terminal status (done/failed) from this point on.
- */
-async function runBuildPhase(
-  jobId: string,
-  sessionId: string,
-  originalPrompt: string,
-  planText: string
-): Promise<void> {
-  if (await isStopped(jobId)) return;
-
-  const sandboxDir = seedSandboxTemplate(sessionId);
-
-  let port: number;
-  try {
-    const result = await sandboxProvider.start(sessionId, {
-      onStatus: (text) => {
-        appendEvent(jobId, "system", "status", { text }).catch((err) => {
-          console.error(`[agent] job ${jobId} failed to append status event`, err);
-        });
-      },
-    });
-    port = result.port;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await appendEvent(jobId, "system", "error", {
-      message: `Failed to start the sandbox: ${message}`,
-    });
-    await setJobStatus(jobId, "failed");
-    await sandboxProvider.stop(sessionId).catch(() => {});
-    return;
-  }
-
-  if (await isStopped(jobId)) {
-    await sandboxProvider.stop(sessionId).catch(() => {});
-    return;
-  }
-
-  await appendEvent(jobId, "system", "preview_ready", {
-    url: `http://localhost:${port}`,
-  });
-
-  const buildPrompt = `Build the app now in this working directory, based on the plan below and the original request.
-
-Original request: ${originalPrompt}
-
-Plan:
-${planText || "(no additional plan text was captured — use the original request directly)"}`;
-
-  try {
-    await runBuildQuery(jobId, sandboxDir, buildPrompt);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await appendEvent(jobId, "system", "error", { message: `Build failed: ${message}` });
-    await setJobStatus(jobId, "failed");
-    await sandboxProvider.stop(sessionId).catch(() => {});
-    return;
-  }
-
-  if (await isStopped(jobId)) {
-    await sandboxProvider.stop(sessionId).catch(() => {});
-    return;
-  }
-
-  const changed = await snapshotSessionFiles(sessionId, sandboxDir);
-  if (changed.length > 0) {
-    await appendEvent(jobId, "system", "files_changed", { paths: changed });
-  }
-
-  if (await isStopped(jobId)) {
-    await sandboxProvider.stop(sessionId).catch(() => {});
-    return;
-  }
-
-  await appendEvent(jobId, "assistant", "assistant_message", {
-    text: "Your app is built and running in the live preview. Keep chatting to iterate on it.",
-  });
-
-  // Deliberately NOT stopping the sandbox here — the preview iframe should
-  // keep serving the running dev server after the job finishes.
-  await setJobStatus(jobId, "done");
-}
 
 /**
  * The build query() call: real Bash/Read/Write/Edit/Glob/Grep tools, `cwd`'d
- * into the real sandbox directory (not the Phase 1 throwaway scratch dir).
- * `ask_user` stays registered (not required) in case the model genuinely
- * needs to ask something scoping didn't cover — see the residual-risk note
- * at the top of this file re: `cwd` not being a hard filesystem jail.
+ * into the real sandbox directory (not the planning phase's throwaway
+ * scratch dir). `ask_user` stays registered (not required) in case the
+ * model genuinely needs to ask something planning didn't cover — see the
+ * residual-risk note at the top of this file re: `cwd` not being a hard
+ * filesystem jail.
  */
 async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promise<void> {
   const emergentServer = createSdkMcpServer({
@@ -693,7 +798,7 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
   const q = query({
     prompt,
     options: {
-      model: MODEL,
+      model: BUILDER_MODEL,
       cwd,
       env: getAgentEnv(),
       systemPrompt: BUILD_SYSTEM_PROMPT,
@@ -761,12 +866,13 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
       await recordUsage(
         jobId,
         "build_query",
+        BUILDER_MODEL,
         message.usage.input_tokens,
         message.usage.output_tokens
       );
 
       if (message.subtype !== "success") {
-        throw new Error(describeResultError(message));
+        throw new Error(describeResultError(message, BUILD_MAX_ITERATIONS));
       }
     }
   }
@@ -774,8 +880,349 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
   if (sessionId) await setAgentSessionId(jobId, sessionId);
 }
 
-// Continuing an already-built session (src/server/sessions.ts's
-// continueSessionWithPrompt) used to run through the exact same
+// ---------------------------------------------------------------------------
+// Review + Debug tail (claude-sonnet-5, always — Opus is reserved for
+// planning only) — runs after every successful build, whichever path got it
+// there (fresh build, continuation with Plan mode, or a direct continuation
+// edit).
+// ---------------------------------------------------------------------------
+
+interface ReviewResult {
+  issuesFound: boolean;
+  summary: string;
+  findings: string[];
+}
+
+/**
+ * Forces the review query to report structured findings instead of the
+ * harness having to parse free text — same "custom SDK MCP tool the model
+ * must call" pattern as buildAskUserTool, just reporting instead of asking.
+ */
+function buildReportReviewTool(resultRef: { value: ReviewResult | null }) {
+  return tool(
+    "report_review",
+    "Report your code review findings. Call this exactly once, after inspecting the code, whether or not you found anything wrong.",
+    {
+      issuesFound: z
+        .boolean()
+        .describe("true if you found any real bugs, broken functionality, or issues worth fixing"),
+      summary: z.string().min(1).describe("1-3 sentence summary of the review, for the user"),
+      findings: z
+        .array(z.string().min(1))
+        .max(10)
+        .default([])
+        .describe("Specific issues found, each as its own concise item — empty if issuesFound is false"),
+    },
+    async (args) => {
+      resultRef.value = {
+        issuesFound: args.issuesFound,
+        summary: args.summary,
+        findings: args.findings,
+      };
+      return {
+        content: [{ type: "text" as const, text: "Review recorded." }],
+      };
+    }
+  );
+}
+
+async function runReviewPhase(jobId: string, cwd: string): Promise<ReviewResult> {
+  const resultRef: { value: ReviewResult | null } = { value: null };
+  const emergentServer = createSdkMcpServer({
+    name: "emergent",
+    version: "1.0.0",
+    tools: [buildReportReviewTool(resultRef)],
+  });
+
+  const q = query({
+    prompt:
+      "Review the app that was just built or edited in this working directory. Report your findings via report_review.",
+    options: {
+      model: BUILDER_MODEL,
+      cwd,
+      env: getAgentEnv(),
+      systemPrompt: REVIEW_SYSTEM_PROMPT,
+      maxTurns: REVIEW_MAX_ITERATIONS,
+      tools: REVIEW_TOOLS,
+      mcpServers: { emergent: emergentServer },
+      allowedTools: [...REVIEW_TOOLS, "mcp__emergent__report_review"],
+      strictMcpConfig: true,
+      settingSources: [],
+      // Same rationale as runBuildQuery — fully autonomous, no interactive
+      // permission prompt available. Review is read-only by tool allowlist
+      // (REVIEW_TOOLS has no Write/Edit), so this doesn't grant it any
+      // write access.
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    },
+  });
+
+  let sessionId: string | undefined;
+
+  for await (const message of q) {
+    if (await isStopped(jobId)) {
+      q.close();
+      break;
+    }
+
+    if (message.type === "assistant") {
+      for (const block of message.message.content) {
+        if (block.type === "tool_use" && block.name !== "mcp__emergent__report_review") {
+          await appendEvent(jobId, "assistant", "tool_call", {
+            id: block.id,
+            name: block.name,
+            input: block.input,
+          });
+        }
+      }
+      continue;
+    }
+
+    if (message.type === "result") {
+      sessionId = message.session_id;
+      await recordUsage(
+        jobId,
+        "review_query",
+        BUILDER_MODEL,
+        message.usage.input_tokens,
+        message.usage.output_tokens
+      );
+      if (message.subtype !== "success") {
+        throw new Error(describeResultError(message, REVIEW_MAX_ITERATIONS));
+      }
+    }
+  }
+
+  if (sessionId) await setAgentSessionId(jobId, sessionId);
+
+  // The model is instructed to always call report_review, but if it somehow
+  // finished without doing so (e.g. hit the turn cap first), treat that as
+  // "nothing conclusively found" rather than crashing the whole job over a
+  // review pass — the build itself already succeeded.
+  const result = resultRef.value ?? {
+    issuesFound: false,
+    summary: "Review completed without a structured report.",
+    findings: [],
+  };
+
+  await appendEvent(jobId, "assistant", "review", { ...result });
+  await appendEvent(jobId, "assistant", "assistant_message", { text: result.summary });
+
+  return result;
+}
+
+async function runDebugPhase(jobId: string, cwd: string, review: ReviewResult): Promise<void> {
+  const findingsList =
+    review.findings.length > 0
+      ? review.findings.map((finding, i) => `${i + 1}. ${finding}`).join("\n")
+      : review.summary;
+
+  const q = query({
+    prompt: `Fix the following issues found in code review:\n\n${findingsList}`,
+    options: {
+      model: BUILDER_MODEL,
+      cwd,
+      env: getAgentEnv(),
+      systemPrompt: DEBUG_SYSTEM_PROMPT,
+      maxTurns: DEBUG_MAX_ITERATIONS,
+      tools: BUILD_TOOLS,
+      mcpServers: {},
+      allowedTools: BUILD_TOOLS,
+      strictMcpConfig: true,
+      settingSources: [],
+      // Same rationale as runBuildQuery.
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    },
+  });
+
+  let sessionId: string | undefined;
+
+  for await (const message of q) {
+    if (await isStopped(jobId)) {
+      q.close();
+      return;
+    }
+
+    if (message.type === "assistant") {
+      let blockIndex = 0;
+      for (const block of message.message.content) {
+        if (block.type === "text" && block.text.trim()) {
+          await appendEvent(jobId, "assistant", "assistant_message", {
+            text: block.text,
+            stepId: message.uuid,
+            blockIndex: blockIndex++,
+          });
+        } else if (block.type === "tool_use") {
+          await appendEvent(jobId, "assistant", "tool_call", {
+            id: block.id,
+            name: block.name,
+            input: block.input,
+          });
+          blockIndex++;
+        }
+      }
+      continue;
+    }
+
+    if (message.type === "result") {
+      sessionId = message.session_id;
+      await recordUsage(
+        jobId,
+        "debug_query",
+        BUILDER_MODEL,
+        message.usage.input_tokens,
+        message.usage.output_tokens
+      );
+      if (message.subtype !== "success") {
+        throw new Error(describeResultError(message, DEBUG_MAX_ITERATIONS));
+      }
+    }
+  }
+
+  if (sessionId) await setAgentSessionId(jobId, sessionId);
+}
+
+/**
+ * Review, then debug-only-if-the-review-found-something, then re-snapshot
+ * if the debug pass actually changed anything. Shared tail for every build
+ * path (fresh build, continuation-with-plan, direct continuation edit).
+ */
+async function runReviewAndDebugTail(
+  jobId: string,
+  sessionId: string,
+  cwd: string
+): Promise<void> {
+  const review = await runReviewPhase(jobId, cwd);
+  if (await isStopped(jobId)) return;
+
+  if (!review.issuesFound) return;
+
+  await runDebugPhase(jobId, cwd, review);
+  if (await isStopped(jobId)) return;
+
+  const changed = await snapshotSessionFiles(sessionId, cwd);
+  if (changed.length > 0) {
+    await appendEvent(jobId, "system", "files_changed", { paths: changed });
+  }
+}
+
+/**
+ * Starts the session's sandbox (template seed + npm install + `npm run dev`,
+ * see src/server/sandbox.ts), runs the real build query() against it, runs
+ * the review(+debug) tail, then snapshots the sandbox directory into the
+ * `files` table. Owns the job's terminal status (done/failed) from this
+ * point on.
+ */
+async function runBuildPhase(
+  jobId: string,
+  sessionId: string,
+  originalPrompt: string,
+  planText: string
+): Promise<void> {
+  if (await isStopped(jobId)) return;
+
+  const sandboxDir = seedSandboxTemplate(sessionId);
+
+  let port: number;
+  try {
+    const result = await sandboxProvider.start(sessionId, {
+      onStatus: (text) => {
+        appendEvent(jobId, "system", "status", { text }).catch((err) => {
+          console.error(`[agent] job ${jobId} failed to append status event`, err);
+        });
+      },
+    });
+    port = result.port;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await appendEvent(jobId, "system", "error", {
+      message: `Failed to start the sandbox: ${message}`,
+    });
+    await setJobStatus(jobId, "failed");
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  if (await isStopped(jobId)) {
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  await appendEvent(jobId, "system", "preview_ready", {
+    url: `http://localhost:${port}`,
+  });
+
+  const projectContext = await getProjectAgentContext(sessionId);
+
+  const buildPrompt = `Build the app now in this working directory, based on the plan below and the original request.
+
+${formatProjectContextBlock(projectContext)}
+
+Original request: ${originalPrompt}
+
+Plan:
+${planText || "(no additional plan text was captured — use the original request directly)"}`;
+
+  try {
+    await runBuildQuery(jobId, sandboxDir, buildPrompt);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await appendEvent(jobId, "system", "error", { message: `Build failed: ${message}` });
+    await setJobStatus(jobId, "failed");
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  if (await isStopped(jobId)) {
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  const changed = await snapshotSessionFiles(sessionId, sandboxDir);
+  if (changed.length > 0) {
+    await appendEvent(jobId, "system", "files_changed", { paths: changed });
+  }
+
+  if (await isStopped(jobId)) {
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  // The build itself already succeeded and is safely snapshotted above — a
+  // review/debug failure (e.g. the review pass hitting its turn cap without
+  // reaching a conclusion) is a lesser problem than that and must NOT undo a
+  // good build. Log it and still finish normally (done, sandbox left
+  // running) rather than failing the whole job and tearing down a working
+  // live preview over a review pass that merely couldn't complete.
+  try {
+    await runReviewAndDebugTail(jobId, sessionId, sandboxDir);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await appendEvent(jobId, "system", "error", {
+      message: `Review/debug pass didn't complete (${message}) — your build itself succeeded and is unaffected.`,
+    });
+  }
+
+  if (await isStopped(jobId)) {
+    await sandboxProvider.stop(sessionId).catch(() => {});
+    return;
+  }
+
+  await appendEvent(jobId, "assistant", "assistant_message", {
+    text: "Your app is built and running in the live preview. Keep chatting to iterate on it.",
+  });
+
+  // Deliberately NOT stopping the sandbox here — the preview iframe should
+  // keep serving the running dev server after the job finishes.
+  await setJobStatus(jobId, "done");
+}
+
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+// Continuing an already-built session used to run through the exact same
 // from-scratch scoping flow as a brand-new project — ask_user firing a
 // generic "what are you building" style questionnaire with zero awareness
 // that a real app, with real existing files, already sits in this session's
@@ -783,12 +1230,63 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
 // an existing app or a new one?" Real coding-agent UX for a follow-up edit
 // is to just make the change (using judgment for anything ambiguous) rather
 // than block on a multiple-choice form — this plan text tells the build
-// query to behave that way.
+// query to behave that way. Only used on the direct-edit path (Plan mode
+// off); Plan mode on uses CONTINUATION_PLANNING_SYSTEM_PROMPT instead.
 const CONTINUATION_PLAN_TEXT = `This is a continuation of an app that is already built and running in this working directory — it is NOT a fresh build, so do not scaffold from scratch or assume an empty project.
 
 First inspect the existing files (list the directory, then read whatever's relevant to the request) to understand the current implementation and its conventions, then make the requested change directly.
 
 Only stop to ask a clarifying question if the request is genuinely ambiguous in a way that risks doing the wrong thing. For a straightforward iterative request, make a reasonable choice consistent with the existing app and note what you chose in your closing summary — don't block on a multiple-choice questionnaire for a small change.`;
+
+/** A brand-new project's first job: always plans (Opus), always requires ask_user on the first pass. */
+async function runInitialBuildFlow(jobId: string, prompt: string): Promise<void> {
+  const cwd = ensureJobScratchDir(jobId);
+  const planText = await runPlanningPhase(jobId, cwd, SYSTEM_PROMPT, prompt, true);
+  if (planText === null) return;
+  if (await isStopped(jobId)) return;
+
+  await runSummaryQuery(jobId, cwd);
+  if (await isStopped(jobId)) return;
+
+  const job = await getJob(jobId);
+  if (!job) return;
+
+  await runBuildPhase(jobId, job.sessionId, prompt, planText);
+}
+
+/**
+ * A follow-up message on an already-built session. `planMode` (from that
+ * job's `user_message` event payload — see runRealLoop) picks direct-edit
+ * (today's default) vs the full Opus-plan -> approve -> Sonnet-build
+ * pipeline. Either way, runBuildPhase's review(+debug) tail always runs.
+ */
+async function runContinuationFlow(
+  jobId: string,
+  sessionId: string,
+  prompt: string,
+  planMode: boolean
+): Promise<void> {
+  if (!planMode) {
+    await appendEvent(jobId, "assistant", "assistant_message", {
+      text: "Got it — let me take a look at the app and make that change.",
+    });
+    await runBuildPhase(jobId, sessionId, prompt, CONTINUATION_PLAN_TEXT);
+    return;
+  }
+
+  const cwd = ensureJobScratchDir(jobId);
+  const planText = await runPlanningPhase(
+    jobId,
+    cwd,
+    CONTINUATION_PLANNING_SYSTEM_PROMPT,
+    prompt,
+    false
+  );
+  if (planText === null) return;
+  if (await isStopped(jobId)) return;
+
+  await runBuildPhase(jobId, sessionId, prompt, planText);
+}
 
 async function runRealLoop(jobId: string): Promise<void> {
   try {
@@ -796,27 +1294,30 @@ async function runRealLoop(jobId: string): Promise<void> {
 
     const allEvents = await getAllEvents(jobId);
 
-    // The scoping phase runs start-to-finish inside one long-lived query()
-    // call (see runScopingQuery) — the ask_user tool blocks *inside that
-    // call* until answered, so a second invocation of runAgentLoop for the
-    // same job (e.g. the resume POST from /messages while the first call is
-    // still parked in the tool handler) is naturally a no-op: the
-    // in-process `runningJobs` guard in runAgentLoop already prevents real
-    // re-entrancy. This check instead guards the orphan case — dev server
-    // restarted mid-run, so `runningJobs` is empty in the new process too —
-    // where a prior ask_user tool_call is already on the log. Resuming the
-    // underlying CLI session across a process restart is out of scope for
-    // this phase (see the Phase 1 limitation note in src/server/jobs.ts).
-    const alreadyStartedScoping = allEvents.some(
-      (e) => e.type === "tool_call" && (e.payload as { name?: string }).name === "ask_user"
+    // Guards the orphan case (dev server restarted mid-run, so the
+    // in-process `runningJobs` guard in runAgentLoop is empty in the new
+    // process too) — a job that already progressed into planning (an
+    // ask_user tool_call, or a `plan` event once ask_user isn't required)
+    // just no-ops here rather than restarting planning from zero. Resuming
+    // the underlying CLI session / plan-decision wait across a process
+    // restart is out of scope (same accepted limitation as ask_user's
+    // waitForAnswer — see src/server/jobs.ts).
+    const alreadyStartedPlanning = allEvents.some(
+      (e) =>
+        (e.type === "tool_call" && (e.payload as { name?: string }).name === "ask_user") ||
+        e.type === "plan"
     );
-    if (alreadyStartedScoping) return;
+    if (alreadyStartedPlanning) return;
 
     const userMessageEvent = allEvents.find((e) => e.type === "user_message");
-    const prompt = (userMessageEvent?.payload as { text?: string } | undefined)?.text;
+    const userMessagePayload = userMessageEvent?.payload as
+      | { text?: string; planMode?: boolean }
+      | undefined;
+    const prompt = userMessagePayload?.text;
     if (!prompt) {
       throw new Error("Job has no initial user message to build a prompt from.");
     }
+    const planMode = userMessagePayload?.planMode === true;
 
     const job = await getJob(jobId);
     if (!job) return;
@@ -829,14 +1330,11 @@ async function runRealLoop(jobId: string): Promise<void> {
     // createProjectAndJob/continueSessionWithPrompt for this to be correct.
     const existingFiles = await getSessionFiles(job.sessionId);
     if (existingFiles.length > 0) {
-      await appendEvent(jobId, "assistant", "assistant_message", {
-        text: "Got it — let me take a look at the app and make that change.",
-      });
-      await runBuildPhase(jobId, job.sessionId, prompt, CONTINUATION_PLAN_TEXT);
+      await runContinuationFlow(jobId, job.sessionId, prompt, planMode);
       return;
     }
 
-    await runScopingQuery(jobId, prompt);
+    await runInitialBuildFlow(jobId, prompt);
   } catch (err) {
     await handleAgentError(jobId, err);
   }

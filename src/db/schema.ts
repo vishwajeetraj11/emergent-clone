@@ -18,6 +18,10 @@ import {
 export const jobStatusEnum = pgEnum("job_status", [
   "running",
   "waiting_on_user",
+  // Orchestration: a plan is written and awaiting the user's
+  // approve/revise decision — see src/lib/types.ts's JobStatus for why this
+  // is distinct from waiting_on_user.
+  "waiting_on_plan",
   "done",
   "stopped",
   "failed",
@@ -110,6 +114,29 @@ export const sessions = pgTable("sessions", {
   // Your Application"), nullable — stays null until a real VERCEL_TOKEN is
   // configured and a deploy actually succeeds. Mirrors githubRepoUrl above.
   vercelDeploymentUrl: text("vercel_deployment_url"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// deployments — full history of Vercel deploys for a session
+// ---------------------------------------------------------------------------
+
+// sessions.vercelDeploymentUrl only ever holds the LATEST deploy — each
+// redeploy overwrites it, so once a newer deploy lands there's no way back
+// to an older one's URL even though Vercel keeps it live. This table is the
+// append-only history behind it (mirrors why `files` exists alongside a
+// session instead of one column): every successful deploy gets a row here,
+// and "Deploy" (create a new one) stays a separate action in the UI from
+// "view a past one" (no new deploy needed) — see the Deployments dropdown
+// in src/components/shell/ChatPanel.tsx.
+export const deployments = pgTable("deployments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  sessionId: uuid("session_id")
+    .notNull()
+    .references(() => sessions.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

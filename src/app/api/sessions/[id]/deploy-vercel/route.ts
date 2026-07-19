@@ -25,7 +25,7 @@ export async function POST(
   if (!isVercelConfigured()) {
     return NextResponse.json({
       configured: false,
-      error: "Vercel deploy is not configured in this environment. Set VERCEL_TOKEN to enable Deploy.",
+      error: "Deploying isn't turned on for this app yet — ask the site operator to enable it.",
     });
   }
 

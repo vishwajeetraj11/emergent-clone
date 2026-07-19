@@ -28,7 +28,8 @@ type ProjectTab = {
 };
 
 function jobStatusToDotStatus(status: JobStatus | null | undefined): ProjectTab["status"] {
-  if (status === "running" || status === "waiting_on_user") return "running";
+  if (status === "running" || status === "waiting_on_user" || status === "waiting_on_plan")
+    return "running";
   if (status === "failed") return "error";
   return "idle";
 }
@@ -49,6 +50,7 @@ export function TopBar({
   jobStatus,
   onNavigateHome,
   onSelectProject,
+  onRenameProject,
 }: {
   project?: ProjectSummary | null;
   jobStatus?: JobStatus | null;
@@ -57,12 +59,17 @@ export function TopBar({
   onNavigateHome?: () => void;
   /** Phase 3: real navigation for a project tab — to /p/[projectId]. */
   onSelectProject?: (projectId: string) => void;
+  /** PATCH /api/projects/[id] — see useAgentSession's renameProject. */
+  onRenameProject?: (name: string) => Promise<void>;
 }) {
   // Phase 1 only ever drives a single active project, so the tab list is
   // derived directly from props on every render rather than mirrored into
   // state via an effect. Local state only tracks UI-only overrides: a tab
   // the user dismissed, or manually clicking a (currently single) tab.
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [isSavingRename, setIsSavingRename] = useState(false);
   const [activeOverride, setActiveOverride] = useState<string | null>(null);
 
   // Phase 4 (Half A, REAL): the "Buy Credits" button now reflects the
@@ -138,7 +145,7 @@ export function TopBar({
       ? [
           {
             id: project.id,
-            name: project.slug,
+            name: project.name,
             status: jobStatusToDotStatus(jobStatus),
           },
         ]
@@ -150,6 +157,53 @@ export function TopBar({
   function closeTab(id: string) {
     setDismissedIds((prev) => new Set(prev).add(id));
     setActiveOverride((prev) => (prev === id ? null : prev));
+  }
+
+  function startRenaming(tab: ProjectTab) {
+    if (!onRenameProject) return;
+    setRenamingId(tab.id);
+    setRenameValue(tab.name);
+  }
+
+  async function commitRename(originalName: string) {
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === originalName) {
+      setRenamingId(null);
+      return;
+    }
+    setIsSavingRename(true);
+    try {
+      await onRenameProject?.(trimmed);
+      setRenamingId(null);
+    } catch {
+      // Leave the input open with the attempted value so the user can
+      // retry or cancel — a silently reverted rename reads as "it worked".
+    } finally {
+      setIsSavingRename(false);
+    }
+  }
+
+  // Navigating home/starting a new project is just a route change — the
+  // current project is never deleted, always reachable again from "Your
+  // projects" on the home screen — but leaving mid-job LOOKS like the chat
+  // vanished (the agent is actively answering/building and the view just
+  // cuts away). Confirm only in that case; a finished/idle project has
+  // nothing at risk, so don't nag every single click.
+  const jobInFlight =
+    jobStatus === "running" ||
+    jobStatus === "waiting_on_user" ||
+    jobStatus === "waiting_on_plan";
+
+  function guardedNavigateHome() {
+    if (
+      jobInFlight &&
+      !window.confirm(
+        "The agent is still working on this project. Leave anyway? Nothing is deleted — you can always come back from \"Your projects.\""
+      )
+    ) {
+      return;
+    }
+    onNavigateHome?.();
   }
 
   return (
@@ -169,7 +223,7 @@ export function TopBar({
           variant="ghost"
           size="sm"
           className="gap-1.5 text-muted-foreground"
-          onClick={onNavigateHome}
+          onClick={guardedNavigateHome}
         >
           <Home className="size-3.5" />
           Home
@@ -203,7 +257,37 @@ export function TopBar({
                 )}
                 aria-hidden
               />
-              <span className="max-w-40 truncate">{tab.name}</span>
+              {renamingId === tab.id ? (
+                <input
+                  autoFocus
+                  value={renameValue}
+                  disabled={isSavingRename}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onBlur={() => commitRename(tab.name)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      commitRename(tab.name);
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      setRenamingId(null);
+                    }
+                  }}
+                  className="w-28 rounded-sm bg-transparent px-0.5 text-xs outline-none ring-1 ring-ring/50 disabled:opacity-50"
+                />
+              ) : (
+                <span
+                  className="max-w-40 truncate"
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    startRenaming(tab);
+                  }}
+                  title={onRenameProject ? "Double-click to rename" : undefined}
+                >
+                  {tab.name}
+                </span>
+              )}
               <button
                 type="button"
                 aria-label={`Close ${tab.name}`}
@@ -221,7 +305,7 @@ export function TopBar({
         <button
           type="button"
           aria-label="New project"
-          onClick={onNavigateHome}
+          onClick={guardedNavigateHome}
           className="flex shrink-0 items-center justify-center rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
         >
           <Plus className="size-3.5" />

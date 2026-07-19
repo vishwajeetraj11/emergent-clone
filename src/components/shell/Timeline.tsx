@@ -1,6 +1,7 @@
 "use client";
 
 import { QuestionCard } from "@/components/shell/QuestionCard";
+import { PlanCard } from "@/components/shell/PlanCard";
 import { FilesChangedCard } from "@/components/shell/FilesChangedCard";
 import { Markdown } from "@/components/shell/Markdown";
 import type { AnswerItem, Question, TimelineEvent } from "@/lib/types";
@@ -18,15 +19,38 @@ function findAnswerFor(
   return (answerEvent.payload as { answers?: AnswerItem[] }).answers ?? [];
 }
 
+function findPlanDecisionFor(
+  events: TimelineEvent[],
+  planEventId: string
+): { action: "approve" | "revise"; feedback?: string } | null {
+  const decisionEvent = events.find(
+    (e) =>
+      e.type === "plan_decision" &&
+      (e.payload as { planEventId?: string }).planEventId === planEventId
+  );
+  if (!decisionEvent) return null;
+  return decisionEvent.payload as { action: "approve" | "revise"; feedback?: string };
+}
+
 export function Timeline({
   events,
   onAnswerQuestion,
+  onPlanDecision,
   disabled,
+  planDisabled,
   sessionId,
 }: {
   events: TimelineEvent[];
   onAnswerQuestion: (toolUseId: string, answers: AnswerItem[]) => void;
+  onPlanDecision?: (
+    planEventId: string,
+    action: "approve" | "revise",
+    feedback?: string
+  ) => void;
+  /** Disables QuestionCard interaction — true whenever jobStatus isn't "waiting_on_user". */
   disabled?: boolean;
+  /** Disables PlanCard interaction — true whenever jobStatus isn't "waiting_on_plan". Distinct from `disabled` above since the two statuses are mutually exclusive. */
+  planDisabled?: boolean;
   sessionId?: string | null;
 }) {
   return (
@@ -81,6 +105,34 @@ export function Timeline({
               />
             );
           }
+          case "plan": {
+            const payload = event.payload as {
+              id?: string;
+              text?: string;
+              revision?: number;
+            };
+            if (!payload.id || !payload.text) return null;
+            const decision = findPlanDecisionFor(events, payload.id);
+            return (
+              <PlanCard
+                key={`${event.jobId}-${event.seq}`}
+                planEventId={payload.id}
+                text={payload.text}
+                revision={payload.revision ?? 0}
+                decision={decision}
+                disabled={planDisabled}
+                onDecide={onPlanDecision ?? (() => {})}
+              />
+            );
+          }
+          case "review": {
+            // No dedicated card — the review pass already appends a plain
+            // assistant_message with its summary right after this event, so
+            // this only exists to carry the structured
+            // { issuesFound, summary, findings } payload for anything that
+            // might want it later (e.g. a future "view findings" affordance).
+            return null;
+          }
           case "files_changed": {
             const paths = (event.payload as { paths?: string[] }).paths ?? [];
             if (paths.length === 0) return null;
@@ -105,13 +157,15 @@ export function Timeline({
               </div>
             );
           }
-          // tool_call, usage, and answer events don't render their own
-          // timeline row — tool_call/answer surface via the question card,
-          // usage is metering-only. preview_ready has no timeline row either
-          // — it only drives PreviewPanel's iframe (see useAgentSession).
+          // tool_call, usage, answer, and plan_decision events don't render
+          // their own timeline row — tool_call/answer surface via the
+          // question card, plan_decision surfaces via the plan card, usage
+          // is metering-only. preview_ready has no timeline row either — it
+          // only drives PreviewPanel's iframe (see useAgentSession).
           case "tool_call":
           case "usage":
           case "answer":
+          case "plan_decision":
           case "preview_ready":
           default:
             return null;

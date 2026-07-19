@@ -21,7 +21,7 @@ export async function POST(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  let body: { prompt?: unknown };
+  let body: { prompt?: unknown; planMode?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -32,9 +32,10 @@ export async function POST(
   if (!prompt) {
     return NextResponse.json({ error: "prompt is required" }, { status: 400 });
   }
+  const planMode = body.planMode === true;
 
   try {
-    const { job } = await continueSessionWithPrompt(sessionId, prompt);
+    const { job } = await continueSessionWithPrompt(sessionId, prompt, planMode);
     return NextResponse.json({ job: { id: job.id, status: job.status } });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -43,6 +43,27 @@
       "when": 1784285489309,
       "tag": "0005_useful_jack_power",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784373740772,
+      "tag": "0006_acoustic_echo",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784389127525,
+      "tag": "0007_moaning_mojo",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1784390661276,
+      "tag": "0008_mushy_ozymandias",
+      "breakpoints": true
     }
   ]
 }

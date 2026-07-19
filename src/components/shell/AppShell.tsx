@@ -43,6 +43,7 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
         jobStatus={session.jobStatus}
         onNavigateHome={handleNavigateHome}
         onSelectProject={(id) => router.push(`/p/${id}`)}
+        onRenameProject={session.renameProject}
       />
       <main className="flex min-h-0 flex-1">
         <ChatPanel
@@ -52,6 +53,7 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
           error={session.error}
           hasProject={Boolean(session.project)}
           sessionId={session.sessionId}
+          projectId={session.project?.id ?? null}
           isForking={session.isForking}
           isSendingMessage={session.isSendingMessage}
           saveState={session.saveState}
@@ -62,9 +64,11 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
           deployUrl={session.deployUrl}
           onSubmitPrompt={(prompt) => session.start(prompt, handleCreated)}
           onAnswerQuestion={session.answerQuestion}
+          onPlanDecision={session.decidePlan}
           onStop={session.stop}
           onContinueChat={session.continueChat}
           onFork={session.fork}
+          onSwitchSession={session.switchSession}
           onSave={session.saveToGitHub}
           onDeploy={session.deployToVercel}
         />

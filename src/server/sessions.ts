@@ -29,14 +29,17 @@ export async function getSession(sessionId: string): Promise<SessionRow | null> 
  * including right after a fork, whose seeded job is already "done" (see
  * forkSession below).
  *
- * Reuses runAgentLoop as-is: the new job goes through the same scoping ->
- * build flow a fresh project does. Simpler than teaching the agent loop a
- * "this session already has files, skip scoping" branch, and keeps Phase 1/2
- * agent code untouched, per this phase's scope.
+ * Reuses runAgentLoop as-is: src/server/agent.ts's runRealLoop inspects the
+ * session's existing files to route this into runContinuationFlow rather
+ * than a fresh build. `planMode` (default false — today's direct-edit
+ * behavior) rides on the `user_message` event payload rather than a new DB
+ * column or a flag threaded through more layers than necessary — runRealLoop
+ * reads it back off that same event.
  */
 export async function continueSessionWithPrompt(
   sessionId: string,
-  prompt: string
+  prompt: string,
+  planMode = false
 ): Promise<{ session: SessionRow; job: JobRow }> {
   const db = getDb();
   const trimmed = prompt.trim();
@@ -50,7 +53,7 @@ export async function continueSessionWithPrompt(
   }
 
   const [job] = await db.insert(jobs).values({ sessionId, status: "running" }).returning();
-  await appendEvent(job.id, "user", "user_message", { text: trimmed });
+  await appendEvent(job.id, "user", "user_message", { text: trimmed, planMode });
 
   // Fire-and-forget, same pattern/limitation as createProjectAndJob.
   runAgentLoop(job.id).catch((err) => {

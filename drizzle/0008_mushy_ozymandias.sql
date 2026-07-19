@@ -1,0 +1,1 @@
+ALTER TYPE "public"."job_status" ADD VALUE 'waiting_on_plan' BEFORE 'done';

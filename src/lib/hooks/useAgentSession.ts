@@ -15,7 +15,8 @@ export type SaveState =
   | "done"
   | "error"
   | "not_configured"
-  | "not_connected";
+  | "not_connected"
+  | "needs_reauth";
 export type DeployState = "idle" | "deploying" | "done" | "error" | "not_configured";
 
 interface AgentSessionState {
@@ -59,6 +60,9 @@ const EVENT_TYPES: TimelineEventType[] = [
   "error",
   "files_changed",
   "preview_ready",
+  "plan",
+  "plan_decision",
+  "review",
 ];
 
 const TERMINAL_JOB_STATUSES = new Set<JobStatus>(["done", "stopped", "failed"]);
@@ -358,6 +362,50 @@ export function useAgentSession() {
     [subscribe, attemptRestorePreview]
   );
 
+  /**
+   * Switches to a different session under the SAME project — the fork this
+   * session came from, or one of its forks — without re-fetching the
+   * project itself (unlike loadProject, which resets everything). Backed by
+   * GET /api/projects/[id]/sessions (the session-switcher dropdown); the
+   * caller passes that endpoint's `job` field directly rather than this
+   * hook re-deriving it, since the list call already has it.
+   */
+  const switchSession = useCallback(
+    async (sessionId: string, job: { id: string; status: JobStatus } | null) => {
+      closeStream();
+      setState((prev) => ({
+        ...prev,
+        sessionId,
+        jobId: job?.id ?? null,
+        jobStatus: job?.status ?? null,
+        events: [],
+        previewUrl: null,
+        isLoadingProject: true,
+        error: null,
+      }));
+      try {
+        const historyRes = await fetch(`/api/sessions/${sessionId}/events`);
+        if (!historyRes.ok) {
+          const body = await historyRes.json().catch(() => ({}));
+          throw new Error(body.error ?? `Request failed (${historyRes.status})`);
+        }
+        const historyData = (await historyRes.json()) as { events: TimelineEvent[] };
+        setState((prev) => ({ ...prev, events: historyData.events, isLoadingProject: false }));
+        if (job && !TERMINAL_JOB_STATUSES.has(job.status)) {
+          subscribe(job.id, -1);
+        }
+        attemptRestorePreview(sessionId);
+      } catch (err) {
+        setState((prev) => ({
+          ...prev,
+          isLoadingProject: false,
+          error: err instanceof Error ? err.message : "Failed to switch session",
+        }));
+      }
+    },
+    [subscribe, closeStream, attemptRestorePreview]
+  );
+
   const answerQuestion = useCallback(
     async (toolUseId: string, answers: AnswerItem[]) => {
       const jobId = state.jobId;
@@ -377,6 +425,37 @@ export function useAgentSession() {
         setState((prev) => ({
           ...prev,
           error: err instanceof Error ? err.message : "Failed to send answer",
+        }));
+      }
+    },
+    [state.jobId]
+  );
+
+  /**
+   * The user's response to a `plan` event — approve it as-is, or ask for
+   * changes (POST /api/jobs/[id]/plan, see src/server/agent.ts's
+   * runPlanningPhase/waitForPlanDecision). Optimistically flips jobStatus
+   * back to "running" the same way answerQuestion does for waiting_on_user.
+   */
+  const decidePlan = useCallback(
+    async (planEventId: string, action: "approve" | "revise", feedback?: string) => {
+      const jobId = state.jobId;
+      if (!jobId) return;
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/plan`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ planEventId, action, feedback }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `Request failed (${res.status})`);
+        }
+        setState((prev) => ({ ...prev, jobStatus: "running" }));
+      } catch (err) {
+        setState((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : "Failed to send plan decision",
         }));
       }
     },
@@ -404,7 +483,7 @@ export function useAgentSession() {
    * layer on top through the normal SSE handling.
    */
   const continueChat = useCallback(
-    async (prompt: string) => {
+    async (prompt: string, planMode = false) => {
       const sessionId = state.sessionId;
       if (!sessionId) return;
       setState((prev) => ({ ...prev, isSendingMessage: true, error: null }));
@@ -412,7 +491,7 @@ export function useAgentSession() {
         const res = await fetch(`/api/sessions/${sessionId}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt }),
+          body: JSON.stringify({ prompt, planMode }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
@@ -499,6 +578,7 @@ export function useAgentSession() {
       const data = (await res.json().catch(() => ({}))) as {
         configured?: boolean;
         connected?: boolean;
+        needsReauth?: boolean;
         url?: string;
         error?: string;
       };
@@ -514,6 +594,14 @@ export function useAgentSession() {
         setState((prev) => ({
           ...prev,
           saveState: "not_connected",
+          saveMessage: null,
+        }));
+        return;
+      }
+      if (data.needsReauth === true) {
+        setState((prev) => ({
+          ...prev,
+          saveState: "needs_reauth",
           saveMessage: null,
         }));
         return;
@@ -540,6 +628,32 @@ export function useAgentSession() {
       }));
     }
   }, [state.sessionId]);
+
+  /** Renames the current project (PATCH /api/projects/[id]) — updates the
+   * local `project` field on success so the tab label reflects it right
+   * away, no reload/refetch needed. Throws on failure so the caller (the
+   * tab's inline rename input) can revert its optimistic text back. */
+  const renameProject = useCallback(
+    async (name: string) => {
+      const projectId = state.project?.id;
+      if (!projectId) return;
+      const res = await fetch(`/api/projects/${projectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        project?: ProjectSummary;
+        error?: string;
+      };
+      if (!res.ok || !data.project) {
+        throw new Error(data.error ?? `Request failed (${res.status})`);
+      }
+      const renamed = data.project;
+      setState((prev) => (prev.project ? { ...prev, project: renamed } : prev));
+    },
+    [state.project?.id]
+  );
 
   /** Vercel deploy (Half B — see src/server/vercel.ts): gated inert when
    * VERCEL_TOKEN isn't configured, surfaced as deployState "not_configured"
@@ -590,11 +704,14 @@ export function useAgentSession() {
     ...state,
     start,
     loadProject,
+    switchSession,
     answerQuestion,
+    decidePlan,
     stop,
     continueChat,
     fork,
     saveToGitHub,
     deployToVercel,
+    renameProject,
   };
 }

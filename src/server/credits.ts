@@ -16,38 +16,68 @@ import { creditLedger, jobs, projects, sessions, users } from "@/db/schema";
 // here: each call site calls this exactly once per usage event it emits).
 //
 // COST MODEL (the only place these constants live — change here, nowhere
-// else): 1 credit = $0.01 USD. Token costs below are Claude Sonnet 5's
-// standard published per-token pricing (see PLAN.md's MODEL = "claude-sonnet-5"
-// in src/server/agent.ts) as of this phase — $3/MTok input, $15/MTok output.
-// This is a simple, directly-traceable-to-real-pricing model; a production
-// system might add markup, but this phase intentionally prices at cost.
+// else): 1 credit = $0.01 USD. Token costs below are each model's standard
+// published per-token pricing (confirmed against
+// https://platform.claude.com/docs/en/about-claude/pricing) as of this
+// phase. This is a simple, directly-traceable-to-real-pricing model; a
+// production system might add markup, but this phase intentionally prices
+// at cost.
+//
+// Orchestration (src/server/agent.ts) now runs the planner on
+// claude-opus-4-8 and the builder/reviewer/debugger on claude-sonnet-5 —
+// materially different per-token rates, so cost must be computed per the
+// actual model used for each call, not one flat rate for every call.
 // ---------------------------------------------------------------------------
 
 /** 1 credit = $0.01 USD. The unit the UI and ledger both speak in. */
 export const CREDITS_PER_USD = 100;
 
-/** Claude Sonnet 5 standard input pricing: $3.00 per 1,000,000 tokens. */
-export const INPUT_COST_PER_MILLION_TOKENS_USD = 3.0;
+interface ModelRate {
+  inputPerMillionUsd: number;
+  outputPerMillionUsd: number;
+}
 
-/** Claude Sonnet 5 standard output pricing: $15.00 per 1,000,000 tokens. */
-export const OUTPUT_COST_PER_MILLION_TOKENS_USD = 15.0;
+/** Standard (non-batch, non-cached) per-token pricing, by model id. */
+const MODEL_PRICING: Record<string, ModelRate> = {
+  // Claude Sonnet 5 standard pricing: $3.00 / $15.00 per 1,000,000 tokens.
+  "claude-sonnet-5": { inputPerMillionUsd: 3.0, outputPerMillionUsd: 15.0 },
+  // Claude Opus 4.8 standard pricing: $5.00 / $25.00 per 1,000,000 tokens.
+  "claude-opus-4-8": { inputPerMillionUsd: 5.0, outputPerMillionUsd: 25.0 },
+};
+
+/** Falls back to here (with a warning) for any model string not in MODEL_PRICING above — never silently bills $0. */
+const FALLBACK_RATE = MODEL_PRICING["claude-sonnet-5"];
+
+function rateForModel(model: string): ModelRate {
+  const rate = MODEL_PRICING[model];
+  if (!rate) {
+    console.warn(
+      `[credits] no pricing entry for model "${model}" — billing at claude-sonnet-5's rate as a fallback. Add this model to MODEL_PRICING in src/server/credits.ts.`
+    );
+    return FALLBACK_RATE;
+  }
+  return rate;
+}
 
 /** Starting balance granted once per new user — $10.00 worth of usage. */
 export const SIGNUP_BONUS_CREDITS = 1000;
 
 /**
- * Converts a job's raw token usage into credits, using the constants above.
- * Always rounds up (ceil) so any nonzero usage debits at least 1 credit —
- * never silently rounds a real cost down to 0.
+ * Converts a job's raw token usage into credits, using the given model's
+ * rate from MODEL_PRICING above. Always rounds up (ceil) so any nonzero
+ * usage debits at least 1 credit — never silently rounds a real cost down
+ * to 0.
  */
 export function computeCreditsForUsage(
+  model: string,
   inputTokens: number,
   outputTokens: number
 ): number {
   if (inputTokens <= 0 && outputTokens <= 0) return 0;
+  const rate = rateForModel(model);
   const usd =
-    (inputTokens / 1_000_000) * INPUT_COST_PER_MILLION_TOKENS_USD +
-    (outputTokens / 1_000_000) * OUTPUT_COST_PER_MILLION_TOKENS_USD;
+    (inputTokens / 1_000_000) * rate.inputPerMillionUsd +
+    (outputTokens / 1_000_000) * rate.outputPerMillionUsd;
   return Math.ceil(usd * CREDITS_PER_USD);
 }
 
@@ -65,18 +95,20 @@ async function getJobOwnerUserId(jobId: string): Promise<string | null> {
 
 /**
  * Debits a job's owner for one usage event's token cost — called from
- * src/server/agent.ts immediately after it appends a `usage` event (scoping,
- * summary, and build queries all call this once each). Never throws on a
+ * src/server/agent.ts immediately after it appends a `usage` event (every
+ * query() call in the plan/build/review/debug pipeline calls this once
+ * each, passing whichever model actually ran that call). Never throws on a
  * missing owner (an orphaned/deleted job) — just does nothing, since there's
  * no one to debit.
  */
 export async function debitForJobUsage(
   jobId: string,
   step: string,
+  model: string,
   inputTokens: number,
   outputTokens: number
 ): Promise<void> {
-  const credits = computeCreditsForUsage(inputTokens, outputTokens);
+  const credits = computeCreditsForUsage(model, inputTokens, outputTokens);
   if (credits <= 0) return;
 
   const userId = await getJobOwnerUserId(jobId);
