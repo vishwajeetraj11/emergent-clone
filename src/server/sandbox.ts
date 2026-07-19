@@ -251,6 +251,21 @@ async function findFreePort(): Promise<number> {
 // Process management
 // ---------------------------------------------------------------------------
 
+/**
+ * Minimal environment for the generated app's npm install / dev server —
+ * NOT a copy of process.env. The harness process's environment holds this
+ * platform's own secrets (ANTHROPIC_API_KEY, the platform DATABASE_URL,
+ * GitHub App keys, NEON_API_KEY…), and generated code can trivially read
+ * process.env at runtime — so inheriting the full environment hands every
+ * generated app the keys to the platform itself. Only what npm/next actually
+ * need to run survives; the app's OWN DATABASE_URL arrives separately via
+ * its sandbox `.env.local` (see src/server/project-db.ts).
+ */
+function sandboxEnv(): NodeJS.ProcessEnv {
+  const { PATH, HOME, TMPDIR, USER, SHELL, LANG, LC_ALL, NODE_ENV } = process.env;
+  return { PATH, HOME, TMPDIR, USER, SHELL, LANG, LC_ALL, NODE_ENV };
+}
+
 const MAX_LOG_TAIL_CHARS = 4000;
 
 function appendTail(current: string, chunk: string): string {
@@ -285,7 +300,7 @@ function runCommand(
   onOutput?: (chunk: string) => void
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env: process.env });
+    const child = spawn(command, args, { cwd, env: sandboxEnv() });
     let tail = "";
 
     child.stdout?.on("data", (data: Buffer) => {
@@ -321,7 +336,7 @@ function spawnDevServer(dir: string, port: number): ChildProcess {
   // `npm` wrapper.
   const child = spawn("npm", ["run", "dev", "--", "-p", String(port)], {
     cwd: dir,
-    env: process.env,
+    env: sandboxEnv(),
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });

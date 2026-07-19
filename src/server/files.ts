@@ -12,6 +12,13 @@ import { files } from "@/db/schema";
 
 const EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next", ".turbo"]);
 
+// Secret-bearing env files never leave the sandbox directory: the session's
+// own DATABASE_URL lives in `.env.local` (written by src/server/project-db.ts,
+// regenerated on every sandbox start), and the `files` table feeds the file
+// viewer, GitHub export, Vercel deploys, and fork copies — none of which may
+// carry a live connection string.
+const EXCLUDED_FILES = new Set([".env", ".env.local"]);
+
 // Best-effort binary skip list, in addition to the excluded dirs above — the
 // files table stores `content` as text, so we don't want to jam raw binary
 // bytes (mangled by the utf8 decode) into it.
@@ -46,6 +53,7 @@ function walk(dir: string, baseDir: string, out: string[]): void {
       if (EXCLUDED_DIRS.has(entry.name)) continue;
       walk(path.join(dir, entry.name), baseDir, out);
     } else if (entry.isFile()) {
+      if (EXCLUDED_FILES.has(entry.name)) continue;
       if (BINARY_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
       out.push(path.relative(baseDir, path.join(dir, entry.name)));
     }
