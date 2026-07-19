@@ -1,4 +1,4 @@
-import { App } from "octokit";
+import { App, Octokit } from "octokit";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { projects, sessions, users } from "@/db/schema";
@@ -27,6 +27,19 @@ import { getSessionFiles } from "@/server/files";
 export function isGitHubAppConfigured(): boolean {
   return Boolean(
     process.env.GITHUB_APP_ID && process.env.GITHUB_APP_PRIVATE_KEY_BASE64
+  );
+}
+
+/**
+ * Gates the OAuth "user-to-server" token path (GITHUB_APP_CLIENT_ID/SECRET) —
+ * separate from isGitHubAppConfigured() because this is genuinely optional:
+ * without it, personal-account installs simply can't create new repos (see
+ * GitHubPersonalAccountRepoCreationError) but everything else still works.
+ * Values come from the same GitHub App's settings page, not a separate app.
+ */
+export function isGitHubOAuthConfigured(): boolean {
+  return Boolean(
+    process.env.GITHUB_APP_CLIENT_ID && process.env.GITHUB_APP_CLIENT_SECRET
   );
 }
 
@@ -72,25 +85,169 @@ function getApp(): App {
   return cachedApp;
 }
 
-/** The URL to send a user to in order to install (or re-authorize) the GitHub App. */
+/** The URL to send a user to in order to install the GitHub App for the first time. */
 export async function getGitHubInstallUrl(): Promise<string> {
   const app = getApp();
   return app.getInstallationUrl();
 }
 
 /**
- * Thrown when saveSessionToGitHub needs to create a brand-new repo but the
- * installation is on a personal GitHub account rather than an organization —
- * see the long comment on createRepoForInstallation below for why this is a
- * hard GitHub platform restriction, not a bug.
+ * The URL to send an ALREADY-installed user to in order to (re-)grant the
+ * user-to-server OAuth token — GitHub's standalone `/login/oauth/authorize`
+ * flow, not the install flow. These are genuinely different: "Request user
+ * authorization during installation" only fires that OAuth consent screen
+ * during a brand-new install; re-visiting the install URL for an account
+ * that already has the app installed just shows GitHub's "Configure" page
+ * and never re-prompts for the OAuth grant. This is the only way to get (or
+ * refresh) that grant for a user who installed before OAuth was enabled, or
+ * whose refresh token has expired with nothing left to refresh it.
+ */
+export function getGitHubOAuthAuthorizeUrl(): string {
+  if (!isGitHubOAuthConfigured()) {
+    throw new Error("GitHub OAuth is not configured");
+  }
+  const params = new URLSearchParams({
+    client_id: process.env.GITHUB_APP_CLIENT_ID!,
+  });
+  return `https://github.com/login/oauth/authorize?${params.toString()}`;
+}
+
+/**
+ * Thrown when saveSessionToGitHub needs to create a brand-new repo, the
+ * installation is on a personal GitHub account rather than an organization
+ * (installation tokens can't call POST /user/repos — a hard GitHub platform
+ * restriction), AND either OAuth isn't configured or the user hasn't granted
+ * a user-to-server token yet. See createRepoForPersonalAccount for the path
+ * that avoids this error when OAuth *is* set up.
  */
 export class GitHubPersonalAccountRepoCreationError extends Error {
   constructor(login: string) {
+    const oauthHint = isGitHubOAuthConfigured()
+      ? `Reconnect via "Connect GitHub" and accept the authorization prompt this time — that grants a user token this app can use to create the repo on your behalf.`
+      : `Install the app on a GitHub organization instead (github.com/settings/installations -> Configure -> or reconnect via "Connect GitHub" and pick an org this time), then try Save again.`;
     super(
-      `The GitHub App is installed on your personal account (${login}), which can't create new repositories via the API — that's a GitHub platform restriction, not something this app can work around. Install the app on a GitHub organization instead (github.com/settings/installations -> Configure -> or reconnect via "Connect GitHub" and pick an org this time), then try Save again.`
+      `The GitHub App is installed on your personal account (${login}), which can't create new repositories via the installation token alone — that's a GitHub platform restriction, not something this app can work around. ${oauthHint}`
     );
     this.name = "GitHubPersonalAccountRepoCreationError";
   }
+}
+
+interface GitHubOAuthTokens {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: Date;
+}
+
+/**
+ * Exchanges the OAuth `code` GitHub appends to the install callback (when the
+ * App has "Request user authorization (OAuth) during installation" enabled)
+ * for a user-to-server access token — distinct from the installation token,
+ * and the only token type GitHub allows for POST /user/repos.
+ */
+export async function exchangeGitHubOAuthCode(
+  code: string
+): Promise<GitHubOAuthTokens> {
+  const res = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      client_id: process.env.GITHUB_APP_CLIENT_ID,
+      client_secret: process.env.GITHUB_APP_CLIENT_SECRET,
+      code,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error || !data.access_token) {
+    throw new Error(
+      `GitHub OAuth code exchange failed: ${data.error_description ?? data.error ?? res.status}`
+    );
+  }
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresAt:
+      typeof data.expires_in === "number"
+        ? new Date(Date.now() + data.expires_in * 1000)
+        : undefined,
+  };
+}
+
+async function refreshGitHubUserAccessToken(
+  refreshToken: string
+): Promise<GitHubOAuthTokens> {
+  const res = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      client_id: process.env.GITHUB_APP_CLIENT_ID,
+      client_secret: process.env.GITHUB_APP_CLIENT_SECRET,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error || !data.access_token) {
+    throw new Error(
+      `GitHub OAuth token refresh failed: ${data.error_description ?? data.error ?? res.status}`
+    );
+  }
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresAt:
+      typeof data.expires_in === "number"
+        ? new Date(Date.now() + data.expires_in * 1000)
+        : undefined,
+  };
+}
+
+/** Persists tokens from exchangeGitHubOAuthCode onto the user's row. */
+export async function storeGitHubUserOAuthTokens(
+  userId: string,
+  tokens: GitHubOAuthTokens
+): Promise<void> {
+  const db = getDb();
+  await db
+    .update(users)
+    .set({
+      githubUserAccessToken: tokens.accessToken,
+      githubUserRefreshToken: tokens.refreshToken ?? null,
+      githubUserTokenExpiresAt: tokens.expiresAt ?? null,
+    })
+    .where(eq(users.id, userId));
+}
+
+/**
+ * Returns a live user-to-server access token for this user, refreshing it
+ * first if it's expired (or about to expire) and a refresh token is on
+ * hand — or null if OAuth isn't configured, the user never granted one, or
+ * it's expired with nothing left to refresh it with. Apps with "expire user
+ * authorization tokens" turned off never populate githubUserTokenExpiresAt,
+ * so those tokens are returned as-is indefinitely.
+ */
+export async function getValidGitHubUserAccessToken(
+  userId: string
+): Promise<string | null> {
+  if (!isGitHubOAuthConfigured()) return null;
+
+  const db = getDb();
+  const [row] = await db
+    .select({
+      token: users.githubUserAccessToken,
+      refreshToken: users.githubUserRefreshToken,
+      expiresAt: users.githubUserTokenExpiresAt,
+    })
+    .from(users)
+    .where(eq(users.id, userId));
+
+  if (!row?.token) return null;
+  if (!row.expiresAt) return row.token;
+  if (row.expiresAt.getTime() > Date.now() + 60_000) return row.token;
+  if (!row.refreshToken) return null;
+
+  const refreshed = await refreshGitHubUserAccessToken(row.refreshToken);
+  await storeGitHubUserOAuthTokens(userId, refreshed);
+  return refreshed.accessToken;
 }
 
 /**
@@ -173,7 +330,24 @@ export async function saveSessionToGitHub(sessionId: string): Promise<{ url: str
 
   const app = getApp();
   const octokit = await app.getInstallationOctokit(Number(installationId));
-  const account = await getInstallationAccount(installationId);
+
+  let account: { login: string; type: string };
+  try {
+    account = await getInstallationAccount(installationId);
+  } catch (err) {
+    // 404 = installation no longer exists (user removed the app from their
+    // GitHub account/org); 401 = the installation's credentials were
+    // revoked. Either way the stored githubInstallationId is stale — clear
+    // it and surface the same "not connected" state the first-time flow
+    // uses, so the frontend's existing "Connect GitHub" prompt lets the
+    // user reinstall instead of hitting an opaque 500.
+    const status = statusOf(err);
+    if (status === 404 || status === 401) {
+      await db.update(users).set({ githubInstallationId: null }).where(eq(users.id, currentUser.id));
+      throw new GitHubNotConnectedError();
+    }
+    throw err;
+  }
   const owner = account.login;
   const repoName = row.project.slug;
 
@@ -185,30 +359,51 @@ export async function saveSessionToGitHub(sessionId: string): Promise<{ url: str
     // organization installations (POST /orgs/{org}/repos is
     // enabledForGitHubApps: true) — POST /user/repos, the personal-account
     // equivalent, is explicitly enabledForGitHubApps: false on GitHub's own
-    // published OpenAPI description. This is a hard platform restriction,
-    // not something this app can work around, so a personal-account
-    // installation fails clearly here rather than hitting a confusing 403
-    // from the API. Everything else (reading/writing files in an existing
-    // repo) works the same regardless of account type.
-    if (account.type !== "Organization") {
-      throw new GitHubPersonalAccountRepoCreationError(account.login);
-    }
-    try {
-      const { data: repo } = await octokit.rest.repos.createInOrg({
-        org: account.login,
-        name: repoName,
-        private: true,
-        description: `Generated by Emergent clone — project ${row.project.slug}`,
-      });
-      repoUrl = repo.html_url;
-    } catch (err) {
-      // 422 = a repo with this name already exists under this account —
-      // reuse it rather than failing the save.
-      if (statusOf(err) === 422) {
-        const { data: repo } = await octokit.rest.repos.get({ owner, repo: repoName });
+    // published OpenAPI description. This is a hard platform restriction on
+    // installation tokens specifically, not a bug: a user-to-server OAuth
+    // token (see getValidGitHubUserAccessToken) CAN call POST /user/repos, so
+    // that's the fallback for personal accounts rather than an immediate
+    // failure. Everything else (reading/writing files in an existing repo)
+    // works the same regardless of account type or which token created it.
+    if (account.type === "Organization") {
+      try {
+        const { data: repo } = await octokit.rest.repos.createInOrg({
+          org: account.login,
+          name: repoName,
+          private: true,
+          description: `Generated by Emergent clone — project ${row.project.slug}`,
+        });
         repoUrl = repo.html_url;
-      } else {
-        throw err;
+      } catch (err) {
+        // 422 = a repo with this name already exists under this account —
+        // reuse it rather than failing the save.
+        if (statusOf(err) === 422) {
+          const { data: repo } = await octokit.rest.repos.get({ owner, repo: repoName });
+          repoUrl = repo.html_url;
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      const userAccessToken = await getValidGitHubUserAccessToken(currentUser.id);
+      if (!userAccessToken) {
+        throw new GitHubPersonalAccountRepoCreationError(account.login);
+      }
+      const userOctokit = new Octokit({ auth: userAccessToken });
+      try {
+        const { data: repo } = await userOctokit.rest.repos.createForAuthenticatedUser({
+          name: repoName,
+          private: true,
+          description: `Generated by Emergent clone — project ${row.project.slug}`,
+        });
+        repoUrl = repo.html_url;
+      } catch (err) {
+        if (statusOf(err) === 422) {
+          const { data: repo } = await octokit.rest.repos.get({ owner, repo: repoName });
+          repoUrl = repo.html_url;
+        } else {
+          throw err;
+        }
       }
     }
   }

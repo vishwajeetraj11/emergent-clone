@@ -48,6 +48,22 @@ export const users = pgTable("users", {
   // but this app never does arithmetic on them, so varchar sidesteps any
   // precision edge cases (e.g. bigint/JS number interop) for no cost.
   githubInstallationId: varchar("github_installation_id", { length: 64 }),
+  // GitHub App user-to-server OAuth token (see src/server/github-app.ts's
+  // createRepoForPersonalAccount) — separate from githubInstallationId's
+  // installation token. Only a user token, not an installation token, is
+  // allowed to call POST /user/repos, so this is the one gap installation
+  // tokens can't cover: creating a brand-new repo on a personal (non-org)
+  // account. Nullable: stays null unless GITHUB_APP_CLIENT_ID/SECRET are
+  // configured and the user completed the install flow with GitHub's
+  // "request user authorization (OAuth) during installation" step.
+  githubUserAccessToken: text("github_user_access_token"),
+  githubUserRefreshToken: text("github_user_refresh_token"),
+  // Null when the App has "expire user authorization tokens" turned off
+  // (GitHub's older/default behavior) — in that case the access token above
+  // never expires and this column is never populated.
+  githubUserTokenExpiresAt: timestamp("github_user_token_expires_at", {
+    withTimezone: true,
+  }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
