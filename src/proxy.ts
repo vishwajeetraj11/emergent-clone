@@ -21,6 +21,11 @@ type ClerkHandler = (req: NextRequest, event: NextFetchEvent) => unknown;
 
 let clerkHandler: ClerkHandler | null = null;
 
+// Route-level protection (e.g. /p/[projectId]) lives in each page via
+// isClerkConfigured() + auth(), not here — Clerk's own createRouteMatcher +
+// auth.protect() middleware pattern is deprecated in favor of resource-based
+// checks per-page/layout/route, since path matching here can diverge from
+// how Next.js actually routes a request.
 async function getClerkHandler(): Promise<ClerkHandler> {
   if (!clerkHandler) {
     const { clerkMiddleware } = await import("@clerk/nextjs/server");
