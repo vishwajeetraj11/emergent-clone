@@ -71,6 +71,13 @@
       "when": 1784432243653,
       "tag": "0009_perfect_blue_shield",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1784449447269,
+      "tag": "0010_goofy_romulus",
+      "breakpoints": true
     }
   ]
 }

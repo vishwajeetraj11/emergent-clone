@@ -85,6 +85,13 @@ export const projects = pgTable("projects", {
   name: varchar("name", { length: 255 }).notNull(),
   slug: varchar("slug", { length: 255 }).notNull().unique(),
   status: projectStatusEnum("status").notNull().default("active"),
+  // Neon project backing this project's per-app Postgres databases (see
+  // src/server/project-db.ts). One Neon project per emergent project; each
+  // session gets its own BRANCH inside it (sessions.neonBranchId below), so
+  // a fork's copy-on-write database matches the fork's copy-of-the-files
+  // semantics exactly. Nullable — stays null until the first sandbox start
+  // actually provisions it, and forever when NEON_API_KEY isn't configured.
+  neonProjectId: text("neon_project_id"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -126,6 +133,16 @@ export const sessions = pgTable("sessions", {
   // against the Hobby plan's 10-concurrent cap. This column lets restore
   // look the id up via Sandbox.get() and reattach instead.
   vercelSandboxId: text("vercel_sandbox_id"),
+  // Per-session Neon branch id + its Postgres connection string (see
+  // src/server/project-db.ts and projects.neonProjectId above). The
+  // connection string is written into the sandbox as `.env.local` (excluded
+  // from file snapshots — see src/server/files.ts) so the generated app's
+  // own code reads process.env.DATABASE_URL natively; it is deliberately
+  // NEVER placed in the files table, GitHub exports, or agent prompts.
+  // Both nullable — populated lazily on first sandbox start when
+  // NEON_API_KEY is configured, otherwise never.
+  neonBranchId: text("neon_branch_id"),
+  databaseUrl: text("database_url"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
