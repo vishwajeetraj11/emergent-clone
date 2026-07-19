@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" ADD COLUMN "vercel_sandbox_id" text;

@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -11,7 +12,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { appendEvent, getAllEvents, type EventRow } from "@/server/events";
 import { getJob, setAgentSessionId, setJobStatus } from "@/server/jobs";
-import { sandboxProvider, seedSandboxTemplate } from "@/server/sandbox";
+import { sandboxProvider, seedSandboxTemplate, type SnapshotFile } from "@/server/sandbox";
 import { getSessionFiles, snapshotSessionFiles } from "@/server/files";
 import { debitForJobUsage } from "@/server/credits";
 import { getProjectAgentContext } from "@/server/projects";
@@ -1084,6 +1085,50 @@ async function runDebugPhase(jobId: string, cwd: string, review: ReviewResult): 
 }
 
 /**
+ * Pushes freshly-changed files (as reported by snapshotSessionFiles's return
+ * value) into a *live* remote sandbox, right after each build/debug pass —
+ * see SandboxProvider.syncFiles's doc comment in src/server/sandbox.ts for
+ * why the local provider needs none of this at all (its dev server already
+ * watches the same directory the agent just edited; there's nothing to
+ * push). Optional-chained because syncFiles only exists on a remote
+ * provider, and wrapped in try/catch because a live preview staying in sync
+ * mid-session is a nice-to-have, never something allowed to fail the build
+ * job itself — worst case, the session's next restore rebuilds the sandbox
+ * from this same `files` table snapshot anyway (see restore/route.ts).
+ *
+ * Reads each changed file back off `dir` rather than threading file
+ * contents through from the caller — snapshotSessionFiles already filtered
+ * out binaries/oversized files when it wrote the DB snapshot, so re-reading
+ * here (utf8, same as that snapshot) never risks pulling in something the
+ * sync path can't handle either.
+ */
+async function syncChangedFilesToSandbox(
+  jobId: string,
+  sessionId: string,
+  dir: string,
+  changedPaths: string[]
+): Promise<void> {
+  if (changedPaths.length === 0 || !sandboxProvider.syncFiles) return;
+
+  try {
+    const files: SnapshotFile[] = await Promise.all(
+      changedPaths.map(async (relPath) => ({
+        path: relPath,
+        content: await readFile(join(dir, relPath), "utf8"),
+      }))
+    );
+    // Optional-chained here too (not just in the early-return guard above):
+    // TS's property-narrowing from that guard isn't guaranteed to survive
+    // across the `await` above, and `?.()` is a correct, zero-cost call
+    // either way — same call-site convention documented on
+    // SandboxProvider.syncFiles itself (src/server/sandbox.ts).
+    await sandboxProvider.syncFiles?.(sessionId, files);
+  } catch (err) {
+    console.error(`[agent] job ${jobId} failed to sync changed files to the sandbox`, err);
+  }
+}
+
+/**
  * Review, then debug-only-if-the-review-found-something, then re-snapshot
  * if the debug pass actually changed anything. Shared tail for every build
  * path (fresh build, continuation-with-plan, direct continuation edit).
@@ -1105,6 +1150,7 @@ async function runReviewAndDebugTail(
   if (changed.length > 0) {
     await appendEvent(jobId, "system", "files_changed", { paths: changed });
   }
+  await syncChangedFilesToSandbox(jobId, sessionId, cwd, changed);
 }
 
 /**
@@ -1124,7 +1170,7 @@ async function runBuildPhase(
 
   const sandboxDir = seedSandboxTemplate(sessionId);
 
-  let port: number;
+  let previewUrl: string;
   try {
     const result = await sandboxProvider.start(sessionId, {
       onStatus: (text) => {
@@ -1133,7 +1179,7 @@ async function runBuildPhase(
         });
       },
     });
-    port = result.port;
+    previewUrl = result.url;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await appendEvent(jobId, "system", "error", {
@@ -1150,7 +1196,7 @@ async function runBuildPhase(
   }
 
   await appendEvent(jobId, "system", "preview_ready", {
-    url: `http://localhost:${port}`,
+    url: previewUrl,
   });
 
   const projectContext = await getProjectAgentContext(sessionId);
@@ -1183,6 +1229,7 @@ ${planText || "(no additional plan text was captured — use the original reques
   if (changed.length > 0) {
     await appendEvent(jobId, "system", "files_changed", { paths: changed });
   }
+  await syncChangedFilesToSandbox(jobId, sessionId, sandboxDir, changed);
 
   if (await isStopped(jobId)) {
     await sandboxProvider.stop(sessionId).catch(() => {});

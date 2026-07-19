@@ -3,6 +3,14 @@ import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+// NOTE: this creates a (safe) circular import — sandbox-vercel.ts imports
+// TEMPLATE_DIR and the types above back from this file. Safe because: (1)
+// the type imports it uses are erased at compile time, and (2) the one
+// value import it uses (TEMPLATE_DIR) is only ever read from inside a
+// method body, never at that module's own top level, so it's never touched
+// before this module has finished initializing it. See sandbox-vercel.ts's
+// own imports for the other half of this.
+import { isVercelSandboxConfigured, VercelSandboxProvider } from "./sandbox-vercel";
 
 // ---------------------------------------------------------------------------
 // Phase 2 sandbox: SandboxProvider interface + LocalProcessSandboxProvider.
@@ -17,7 +25,17 @@ import path from "node:path";
 // ---------------------------------------------------------------------------
 
 export interface SandboxStartResult {
-  port: number;
+  /**
+   * Full URL the preview iframe should point at. The local provider mints
+   * `http://localhost:<port>` itself (see LocalProcessSandboxProvider
+   * below); a remote provider (VercelSandboxProvider, src/server/
+   * sandbox-vercel.ts) returns its own public HTTPS domain instead — its
+   * VM's internal port isn't reachable (or meaningful) from a browser on a
+   * different machine, so the interface deals in URLs, not ports. The two
+   * places this gets threaded out to the client: agent.ts's runBuildPhase
+   * (preview_ready event) and the restore route.
+   */
+  url: string;
 }
 
 export interface SandboxStatus {
@@ -37,7 +55,7 @@ export interface SnapshotFile {
 }
 
 export interface SandboxProvider {
-  /** Idempotent: calling twice for a session already running just returns its port. */
+  /** Idempotent: calling twice for a session already running just returns its URL. */
   start(sessionId: string, options?: SandboxStartOptions): Promise<SandboxStartResult>;
   stop(sessionId: string): Promise<void>;
   getStatus(sessionId: string): SandboxStatus;
@@ -47,7 +65,7 @@ export interface SandboxProvider {
    * "possibly new", e.g. a session that never had a live process in this
    * server instance, or a freshly forked session), then starts it exactly
    * like `start()`. If the session already has a live sandbox running,
-   * returns its existing port without touching anything on disk. This is
+   * returns its existing URL without touching anything on disk. This is
    * what turns the Phase 1/2 "orphaned sandbox" limitation into something
    * recoverable: the `files` table (already durable in Postgres) is enough
    * to bring a dev server back up in a brand new process, no agent rebuild
@@ -58,6 +76,22 @@ export interface SandboxProvider {
     files: SnapshotFile[],
     options?: SandboxStartOptions
   ): Promise<SandboxStartResult>;
+  /**
+   * Optional: pushes already-changed files into a *live* sandbox without a
+   * full restart. The local provider omits this entirely — its dev server's
+   * cwd IS the same directory the build/debug agent's Bash/Write/Edit tools
+   * edit directly (see seedSandboxTemplate/getSandboxDir below), so Next's
+   * own file watcher already picks up every change for free, nothing to
+   * "sync". A remote provider (VercelSandboxProvider) has no such shared
+   * filesystem — its copy of the files only ever moves via an explicit
+   * write call — so it implements this to push each build/debug pass's
+   * changed files (see src/server/agent.ts's runBuildPhase /
+   * runReviewAndDebugTail, right after each snapshotSessionFiles call) into
+   * the running VM, where its own `npm run dev` hot-reloads them same as
+   * local. Every call site optional-chains this (`sandboxProvider.syncFiles?.(...)`)
+   * for exactly this reason — it may simply not exist.
+   */
+  syncFiles?(sessionId: string, files: SnapshotFile[]): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,8 +114,13 @@ const SANDBOX_ROOT =
  * the repo root. This assumes process.cwd() is the repo root, which is true
  * for `next dev`/`next start` (and for `next build`, which never calls this
  * function). Good enough for the dev-mode single-user tool this phase ships.
+ *
+ * Exported so src/server/sandbox-vercel.ts can seed a *remote* sandbox's
+ * filesystem from the same template (it has no shared disk with this
+ * process, so it can't reuse seedSandboxTemplate's cpSync — it reads these
+ * files' contents and pushes them over the wire instead).
  */
-const TEMPLATE_DIR = path.join(process.cwd(), "src", "server", "sandbox-template");
+export const TEMPLATE_DIR = path.join(process.cwd(), "src", "server", "sandbox-template");
 
 export function getSandboxDir(sessionId: string): string {
   return path.join(SANDBOX_ROOT, sessionId);
@@ -396,7 +435,7 @@ export class LocalProcessSandboxProvider implements SandboxProvider {
   ): Promise<SandboxStartResult> {
     const existing = registry.get(sessionId);
     if (existing && existing.state === "running" && existing.child && existing.child.exitCode === null) {
-      return { port: existing.port };
+      return { url: `http://localhost:${existing.port}` };
     }
 
     const inFlight = startingPromises.get(sessionId);
@@ -481,7 +520,7 @@ export class LocalProcessSandboxProvider implements SandboxProvider {
             state: "running",
             devLogTail: "",
           });
-          return { port: existingPort };
+          return { url: `http://localhost:${existingPort}` };
         }
       }
 
@@ -502,7 +541,7 @@ export class LocalProcessSandboxProvider implements SandboxProvider {
     }
 
     entry.state = "running";
-    return { port };
+    return { url: `http://localhost:${port}` };
   }
 
   async restoreFromSnapshot(
@@ -519,7 +558,7 @@ export class LocalProcessSandboxProvider implements SandboxProvider {
       // restore call always reflects real reachability instead of a
       // possibly-stale cached status.
       const stillAlive = await pollUntilReady(status.port, 2000);
-      if (stillAlive) return { port: status.port };
+      if (stillAlive) return { url: `http://localhost:${status.port}` };
     }
     writeSnapshotFiles(getSandboxDir(sessionId), files);
     return this.start(sessionId, options);
@@ -541,4 +580,28 @@ export class LocalProcessSandboxProvider implements SandboxProvider {
   }
 }
 
-export const sandboxProvider: SandboxProvider = new LocalProcessSandboxProvider();
+// ---------------------------------------------------------------------------
+// Provider selection
+//
+// Same isXConfigured() gating idiom as isClerkConfigured (src/lib/auth.ts)
+// and isVercelConfigured (src/server/vercel.ts — a DIFFERENT gate: that one
+// guards the one-shot "Deploy Your Application" REST call, this one guards
+// the long-lived preview sandbox): unconfigured degrades to "acts like the
+// feature doesn't exist" rather than throwing at import time or at request
+// time. Concretely: SANDBOX_PROVIDER must be set to exactly "vercel" AND all
+// three of VERCEL_TOKEN/VERCEL_TEAM_ID/VERCEL_PROJECT_ID must be present
+// (isVercelSandboxConfigured, src/server/sandbox-vercel.ts) for anything to
+// change from today's behavior — any other value, or a missing/partial
+// credential set, silently falls back to LocalProcessSandboxProvider. This
+// keeps the zero-isolation local default opt-OUT-proof by accident: you
+// can't half-configure your way into thinking you got microVM isolation.
+//
+// Resolved once, at module load — see sandbox-vercel.ts's module doc comment
+// for why a remote provider is even worth having (Firecracker isolation for
+// the generated app's `npm install` + dev server, which today run directly
+// on this host with a full copy of this process's own environment).
+// ---------------------------------------------------------------------------
+export const sandboxProvider: SandboxProvider =
+  process.env.SANDBOX_PROVIDER === "vercel" && isVercelSandboxConfigured()
+    ? new VercelSandboxProvider()
+    : new LocalProcessSandboxProvider();

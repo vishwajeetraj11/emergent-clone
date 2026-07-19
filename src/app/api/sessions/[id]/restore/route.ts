@@ -9,7 +9,7 @@ import { sandboxProvider } from "@/server/sandbox";
  * limitation (dev-server restart kills the in-memory registry, but the
  * files were always durable in Postgres). Idempotent: if the sandbox is
  * already running (never orphaned, or already restored earlier in this
- * process), returns its existing port straight away with no reinstall.
+ * process), returns its existing URL straight away with no reinstall.
  *
  * Also what a freshly forked session uses to get its own, independent
  * sandbox running for the first time (see /api/sessions/[id]/fork).
@@ -35,8 +35,8 @@ export async function POST(
   }
 
   try {
-    const { port } = await sandboxProvider.restoreFromSnapshot(sessionId, files);
-    return NextResponse.json({ url: `http://localhost:${port}` });
+    const { url } = await sandboxProvider.restoreFromSnapshot(sessionId, files);
+    return NextResponse.json({ url });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[api/sessions/${sessionId}/restore] failed`, err);
