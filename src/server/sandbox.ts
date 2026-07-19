@@ -57,6 +57,18 @@ export interface SnapshotFile {
 export interface SandboxProvider {
   /** Idempotent: calling twice for a session already running just returns its URL. */
   start(sessionId: string, options?: SandboxStartOptions): Promise<SandboxStartResult>;
+  /**
+   * Tears down sessionId's sandbox. Under VercelSandboxProvider (v2) this is
+   * a pause, not a deletion: stop() snapshots the filesystem, and the next
+   * start()/restoreFromSnapshot() (via Sandbox.getOrCreate) resumes it in
+   * seconds rather than reinstalling from scratch. Under
+   * LocalProcessSandboxProvider it still just kills the child process (see
+   * that class's stop). Called both from agent.ts's runBuildPhase failure
+   * paths (a build that can't continue shouldn't keep billing/running a
+   * sandbox) and eagerly from /api/sessions/[id]/stop-preview on
+   * navigate-away/tab-close, so an unattended preview isn't left running
+   * until its timeout either.
+   */
   stop(sessionId: string): Promise<void>;
   getStatus(sessionId: string): SandboxStatus;
   /**
@@ -92,6 +104,18 @@ export interface SandboxProvider {
    * for exactly this reason — it may simply not exist.
    */
   syncFiles?(sessionId: string, files: SnapshotFile[]): Promise<void>;
+  /**
+   * Optional: reports whether sessionId's sandbox runtime is still alive.
+   * Returns false ONLY when it's known-dead — its runtime vanished (e.g. a
+   * Vercel VM hit its max timeout mid-session, see sandbox-vercel.ts). Every
+   * other case — healthy, still booting, or simply indeterminate (no record
+   * of it at all) — returns true. Callers (see /api/sessions/[id]/
+   * preview-health) use a false return to swap the live preview iframe for a
+   * "Preview stopped" restart card, so a false positive here (reporting dead
+   * when it's actually fine) is worse than a false negative (missing a real
+   * death until the next poll) — when unsure, return true.
+   */
+  checkPreviewHealth?(sessionId: string): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +410,23 @@ async function pollUntilReady(port: number, timeoutMs: number): Promise<boolean>
   return false;
 }
 
+/**
+ * Single bounded fetch attempt against a local port — checkPreviewHealth's
+ * "is it alive right now" question, as opposed to pollUntilReady's "poll
+ * until it comes up" loop above. Same fetch-with-timeout shape, just once.
+ */
+async function probeLocalUrl(port: number, timeoutMs: number): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(`http://127.0.0.1:${port}/`, { signal: controller.signal });
+    clearTimeout(timeout);
+    return res.ok;
+  } catch {
+    return false; // connection refused, timed out, etc. — not up.
+  }
+}
+
 function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve(true);
@@ -577,6 +618,23 @@ export class LocalProcessSandboxProvider implements SandboxProvider {
     const entry = registry.get(sessionId);
     if (!entry) return { state: "stopped" };
     return { state: entry.state, port: entry.port || undefined, message: entry.message };
+  }
+
+  /**
+   * See SandboxProvider.checkPreviewHealth's doc comment for the false/true
+   * contract. NO registry entry deliberately returns true rather than false:
+   * a harness restart clears this in-memory registry, but a `detached: true`
+   * orphaned child process (see the RegistryEntry doc comment above) keeps
+   * right on serving — exactly the scenario doStart's own orphan-adoption
+   * logic already assumes is possible, so a missing entry here is never
+   * treated as proof of death.
+   */
+  async checkPreviewHealth(sessionId: string): Promise<boolean> {
+    const entry = registry.get(sessionId);
+    if (!entry) return true;
+    if (entry.state === "error") return false;
+    if (entry.state === "running") return probeLocalUrl(entry.port, 2500);
+    return true; // starting-ish — booting, not dead.
   }
 }
 

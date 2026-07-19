@@ -1,10 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { eq } from "drizzle-orm";
 import { Sandbox } from "@vercel/sandbox";
-import { getDb } from "@/db";
-import { sessions } from "@/db/schema";
 import { getSessionFiles } from "@/server/files";
+import { ensureSessionDatabase } from "@/server/project-db";
 import {
   TEMPLATE_DIR,
   type SandboxProvider,
@@ -25,48 +23,41 @@ import {
 // SANDBOX_PROVIDER=vercel + isVercelSandboxConfigured() (see sandbox.ts's
 // factory export) so the zero-isolation local behavior stays the default.
 //
-// PACKAGE VERSION: this repo pins @vercel/sandbox@^1.9.2 (npm resolved
-// 1.10.2 at install time) — the STABLE v1 line, deliberately NOT the v2 API
-// (persistent-by-default sandboxes, `name` identity, `getOrCreate`,
-// auto-resume) which as of this writing is still 2.0.0-beta.11, i.e. not
-// something to build production behavior on. Phase 2 (documented in the
-// implementation plan, not built here) swaps to v2 once it's GA, which
-// would let restore skip the npm-reinstall-from-scratch path below entirely.
+// PACKAGE VERSION: this repo pins @vercel/sandbox@2.7.1 — the GA v2 line.
+// v2's headline change is persistent-by-default sandboxes addressed by a
+// caller-chosen `name` instead of an opaque id: `Sandbox.getOrCreate`
+// resolves "does session X already have a sandbox" and "create one if not"
+// in a single call, which replaces v1's whole registry-probe →
+// DB-id-reattach → fresh-create ladder — there's no sandbox id to persist
+// or reattach by anymore, `name: sessionId` IS the durable identity, unique
+// per Vercel project.
 //
-// EPHEMERAL SEMANTICS (v1): a sandbox is NOT a long-lived resource with a
-// stable identity you can casually look up later — it's created with a
-// `timeout` and is simply gone (VM + filesystem) once that elapses. `Sandbox.
-// list()` exists, but v1's create params have no `name`/tag/metadata field
-// to filter by (that's a v2 addition) — there's no "list my sandboxes and
-// find the one for session X" query, only `Sandbox.get({ sandboxId })` using
-// an id YOU persisted somewhere durable yourself. That's what sessions.vercelSandboxId
-// (src/db/schema.ts) is for: this provider's own in-memory `registry` below
-// has the exact same "dies on harness restart" limitation as
-// LocalProcessSandboxProvider's registry (see that file's comment on it),
-// but unlike a local child process, an abandoned Vercel sandbox keeps
-// running (and billing) until ITS timeout, and a naive "just start a new one
-// every time" restore would also multiply sandboxes against the Hobby
-// plan's 10-concurrent cap. Reattach-by-id is the fix; see tryReattach.
+// LIFECYCLE: a sandbox is stopped eagerly rather than left to bill until it
+// times out — /api/sessions/[id]/stop-preview fires on navigate-away/
+// tab-close (see useAgentSession's pagehide wiring), and agent.ts's
+// runBuildPhase failure paths call stop() too. v2's stop() snapshots the
+// filesystem (persistent: true); the next getOrCreate resumes that snapshot
+// in seconds — a VM boot and re-running the dev server, NOT a from-scratch
+// npm install (node_modules is already on disk). `timeout`
+// (SANDBOX_TIMEOUT_MS, still 45 minutes) is a per-SESSION window, not a
+// cumulative one: every resume starts a fresh clock. Snapshot storage is
+// bounded so an abandoned project doesn't bill forever: keepLastSnapshots
+// {count: 1} plus SNAPSHOT_EXPIRATION_MS (7 days) — past that window
+// getOrCreate's name lookup finds the snapshot already gone and creates
+// fresh instead of resuming, and this provider's own file seeding (the
+// `files` table snapshot) rebuilds it from there, same shape as a stale v1
+// sandbox rebuilding from scratch.
 //
-// LIFECYCLE: created with a 15-minute timeout (SANDBOX_TIMEOUT_MS) — that
-// IS the TTL, there is no separate sweeper. On expiry the VM disappears
-// silently; the next time the session is opened, the restore flow rebuilds
-// it from the `files` table snapshot (writeFiles + npm install, ~60-90s,
-// same "Restoring the sandbox…" UX as a local-provider restore). The six
-// `sandboxProvider.stop()` calls already present in agent.ts's
-// runBuildPhase failure paths now actually stop billing promptly instead of
-// just killing a local process for free.
-//
-// COST (Hobby free allotment, as documented for @vercel/sandbox 1.x): 5
+// COST (Hobby free allotment, as documented for @vercel/sandbox): 5
 // Active-CPU hr/mo, 420 GB-hr memory/mo, 5,000 creations/mo, 10 concurrent
-// sandboxes. Active-CPU billing ignores idle/I/O-wait time, so a
-// 15-minute-timeout sandbox that's mostly sitting there serving a preview
-// costs a small fraction of that — comfortably inside the free tier for
-// this app's verification/demo usage; a sustained multi-user deployment
-// would want to watch the concurrent-sandbox count against the cap.
+// sandboxes. Active-CPU billing ignores idle/I/O-wait time, and eager
+// stop() means a sandbox mostly isn't even sitting idle while nobody has
+// the tab open — comfortably inside the free tier for this app's
+// verification/demo usage; a sustained multi-user deployment would want to
+// watch the concurrent-sandbox count against the cap.
 //
 // ENV HYGIENE: nothing from this process's own `process.env` is ever passed
-// into a sandbox — not on Sandbox.create, not on runCommand. The only
+// into a sandbox — not on Sandbox.getOrCreate, not on runCommand. The only
 // "environment" a sandbox VM gets is whatever its base image ships with.
 // Auth (VERCEL_TOKEN/VERCEL_TEAM_ID/VERCEL_PROJECT_ID) is a control-plane
 // concern — it authenticates the API calls THIS process makes to create/
@@ -80,18 +71,33 @@ export function isVercelSandboxConfigured(): boolean {
 }
 
 /**
- * The sandbox's `timeout` IS its TTL — see the module doc comment above.
- * 45 minutes, the Hobby-plan maximum, and NOT lower on purpose: the first
- * real run with a 15-minute TTL had the sandbox expire *mid-build* (the
- * build agent's own local npm-install/build sanity check can easily take
- * 10+ minutes on a slow network), so the end-of-build syncFiles push landed
- * on a dead VM and the preview 410'd until the next restore. An idle
- * sandbox bills almost zero Active CPU — the cost of the longer window is
- * just provisioned-memory GB-hours, well inside the free allotment.
+ * The sandbox's `timeout` bounds each session's lifetime — see the module
+ * doc comment above on why that's a per-session window now (every
+ * getOrCreate resume starts a fresh clock) rather than a one-shot,
+ * disappears-forever TTL. Still 45 minutes, the Hobby-plan maximum, and NOT
+ * lower on purpose: the first real run with a 15-minute timeout had the
+ * sandbox expire *mid-build* (the build agent's own local npm-install/build
+ * sanity check can easily take 10+ minutes on a slow network), so the
+ * end-of-build syncFiles push landed on a dead VM and the preview 410'd
+ * until the next restore. An idle sandbox bills almost zero Active CPU —
+ * the cost of the longer window is just provisioned-memory GB-hours, well
+ * inside the free allotment.
  */
 const SANDBOX_TIMEOUT_MS = 45 * 60_000;
 
-/** The one port the generated app's dev server listens on, both at `Sandbox.create({ ports })` time and every later `sandbox.domain(3000)` call. */
+/**
+ * Bounds how long a stopped sandbox's filesystem snapshot is retained,
+ * paired with `keepLastSnapshots: { count: 1 }` on every getOrCreate call
+ * (see bootSandbox) to cap billed snapshot storage — see this file's module
+ * doc comment's LIFECYCLE paragraph. A session untouched for longer than
+ * this doesn't resume at all: getOrCreate's name lookup finds the snapshot
+ * already expired, deletes it, and creates fresh instead — this provider's
+ * own file seeding (the `files` table snapshot) rebuilds it from there,
+ * same shape as any other fresh create.
+ */
+const SNAPSHOT_EXPIRATION_MS = 7 * 24 * 60 * 60_000;
+
+/** The one port the generated app's dev server listens on, both at `Sandbox.getOrCreate({ ports })` time and every later `sandbox.domain(3000)` call. */
 const APP_PORT = 3000;
 
 interface VercelCredentials {
@@ -225,28 +231,6 @@ const registry = new Map<string, VercelRegistryEntry>();
 /** Guards concurrent create-or-reattach calls for the same session — same purpose as sandbox.ts's startingPromises. */
 const startingPromises = new Map<string, Promise<SandboxStartResult>>();
 
-/**
- * Attempts to adopt a specific sandboxId as this session's live sandbox:
- * fetches it, checks it's actually running, and confirms its domain
- * actually answers. Returns null for ANY reason it isn't usable (deleted,
- * expired, wrong status, no route on APP_PORT, nothing answering) — the
- * caller's job is just "fall through to a fresh create" either way, so the
- * specific failure reason doesn't need to propagate.
- */
-async function probeExistingSandbox(
-  sandboxId: string
-): Promise<{ sandbox: Sandbox; url: string } | null> {
-  try {
-    const sandbox = await Sandbox.get({ sandboxId, ...resolveCredentials() });
-    if (sandbox.status !== "running") return null;
-    const url = sandbox.domain(APP_PORT);
-    if (!(await probeUrl(url, 2000))) return null;
-    return { sandbox, url };
-  } catch {
-    return null;
-  }
-}
-
 export class VercelSandboxProvider implements SandboxProvider {
   async start(sessionId: string, options?: SandboxStartOptions): Promise<SandboxStartResult> {
     const viaRegistry = await this.probeRegistryEntry(sessionId);
@@ -269,15 +253,12 @@ export class VercelSandboxProvider implements SandboxProvider {
     files: SnapshotFile[],
     options?: SandboxStartOptions
   ): Promise<SandboxStartResult> {
-    // Same "trust but re-verify" order as start(): a live registry entry or
-    // a reattachable DB id both mean "don't touch the files, it's already
-    // running exactly what it should be" — matching local
-    // restoreFromSnapshot's early-return semantics (sandbox.ts).
+    // Same "trust but re-verify" order as start(): a live registry entry
+    // means "don't touch the files, it's already running exactly what it
+    // should be" — matching local restoreFromSnapshot's early-return
+    // semantics (sandbox.ts).
     const viaRegistry = await this.probeRegistryEntry(sessionId);
     if (viaRegistry) return viaRegistry;
-
-    const reattached = await this.tryReattach(sessionId);
-    if (reattached) return reattached;
 
     const inFlight = startingPromises.get(sessionId);
     if (inFlight) return inFlight;
@@ -288,7 +269,7 @@ export class VercelSandboxProvider implements SandboxProvider {
     // whatever came from the template. Re-reading the template here would
     // only risk *reverting* agent edits to template files with the
     // never-edited original.
-    const promise = this.createFresh(sessionId, files, options);
+    const promise = this.bootSandbox(sessionId, files, options);
     startingPromises.set(sessionId, promise);
     try {
       return await promise;
@@ -298,51 +279,36 @@ export class VercelSandboxProvider implements SandboxProvider {
   }
 
   async stop(sessionId: string): Promise<void> {
+    // A stop must not race a mid-boot create/resume for the same session —
+    // e.g. the eager /api/sessions/[id]/stop-preview call landing while
+    // bootSandbox is still mid-`npm install` for a create/resume that raced
+    // it.
+    const inFlight = startingPromises.get(sessionId);
+    if (inFlight) await inFlight.catch(() => {});
+
     const entry = registry.get(sessionId);
-    const db = getDb();
-
-    let sandboxId = entry?.sandbox?.sandboxId;
-    if (!sandboxId) {
-      // No live entry in THIS process (e.g. the harness restarted between
-      // start() and this stop() call) — fall back to the DB-persisted id so
-      // stop() still actually tears the VM down instead of quietly no-op'ing
-      // and leaving it running (and billing) until its own timeout.
-      const [row] = await db
-        .select({ vercelSandboxId: sessions.vercelSandboxId })
-        .from(sessions)
-        .where(eq(sessions.id, sessionId));
-      sandboxId = row?.vercelSandboxId ?? undefined;
+    try {
+      const sandbox =
+        entry?.sandbox ??
+        (await Sandbox.get({ name: sessionId, resume: false, ...resolveCredentials() }));
+      // resume: false — never boot a stopped VM just to stop it. Throws
+      // when no sandbox with this name exists (a session that never
+      // started one, or a pre-migration v1 session with no v2 counterpart)
+      // — the catch below treats that the same as any other best-effort
+      // failure.
+      await sandbox.stop();
+    } catch (err) {
+      // Best-effort, same spirit as src/server/vercel.ts's
+      // disableDeploymentProtection: every caller — agent.ts's
+      // runBuildPhase failure paths, and the eager stop-preview route on
+      // navigate-away — is already done with this sandbox and must not be
+      // blocked by a stop() that couldn't reach the API. Logging here is
+      // noisy for the common "nothing to stop" case (no sandbox with this
+      // name), but there's no cheap way to distinguish that from a real
+      // failure, so it logs either way rather than risk swallowing one
+      // that matters.
+      console.error(`[sandbox-vercel] failed to stop sandbox for session ${sessionId}`, err);
     }
-
-    if (!entry && !sandboxId) return; // nothing to stop, in this process or in the DB.
-
-    if (sandboxId) {
-      try {
-        const sandbox = entry?.sandbox ?? (await Sandbox.get({ sandboxId, ...resolveCredentials() }));
-        await sandbox.stop();
-      } catch (err) {
-        // Best-effort, same spirit as src/server/vercel.ts's
-        // disableDeploymentProtection: the caller (agent.ts's runBuildPhase
-        // failure paths) is already mid-failure-handling and must not be
-        // blocked further by a stop() that couldn't reach the API — worst
-        // case the sandbox just lives out its 15-minute timeout instead of
-        // dying right now.
-        console.error(
-          `[sandbox-vercel] failed to stop sandbox ${sandboxId} for session ${sessionId}`,
-          err
-        );
-      }
-
-      try {
-        await db.update(sessions).set({ vercelSandboxId: null }).where(eq(sessions.id, sessionId));
-      } catch (err) {
-        console.error(
-          `[sandbox-vercel] failed to clear vercelSandboxId for session ${sessionId}`,
-          err
-        );
-      }
-    }
-
     registry.set(sessionId, { sandbox: null, url: "", state: "stopped" });
   }
 
@@ -373,6 +339,45 @@ export class VercelSandboxProvider implements SandboxProvider {
     );
   }
 
+  /**
+   * See SandboxProvider.checkPreviewHealth's doc comment (sandbox.ts) for the
+   * false/true contract. Unlike probeRegistryEntry above (which silently
+   * falls through to a fresh create on a dead entry), a failed probe here
+   * actively deletes the registry entry: this method exists specifically to
+   * catch a VM that died *while nobody was calling start()* (the timeout
+   * expiring mid-session), so the next start()/restoreFromSnapshot() must
+   * not find a stale "running" entry and skip straight to reusing it.
+   */
+  async checkPreviewHealth(sessionId: string): Promise<boolean> {
+    const entry = registry.get(sessionId);
+    if (entry) {
+      if (entry.state === "running") {
+        if (await probeUrl(entry.url, 3000)) return true;
+        registry.delete(sessionId);
+        return false;
+      }
+      if (entry.state === "error") return false;
+      // An eager stop (/api/sessions/[id]/stop-preview, or an agent.ts
+      // failure path) already knows the sandbox is down — reflect that
+      // immediately rather than waiting for a probe, so the paused-preview
+      // card shows right away instead of only after the next poll.
+      if (entry.state === "stopped") return false;
+      return true; // creating/installing/starting — booting, not dead.
+    }
+
+    // No in-memory record at all — e.g. the main server restarted while the
+    // user's tab stayed open. `name: sessionId` is this sandbox's durable
+    // identity (see this file's module doc comment), so a direct by-name
+    // lookup replaces the old DB vercelSandboxId indirection.
+    try {
+      const sandbox = await Sandbox.get({ name: sessionId, resume: false, ...resolveCredentials() });
+      if (sandbox.status !== "running") return false; // stopped/snapshotting/failed → paused card
+      return probeUrl(sandbox.domain(APP_PORT), 3000);
+    } catch {
+      return false; // no sandbox with this name — nothing is serving the preview URL the client holds
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
@@ -389,40 +394,7 @@ export class VercelSandboxProvider implements SandboxProvider {
     return null;
   }
 
-  /**
-   * DB-id reattach: looks up sessions.vercelSandboxId, and if set, tries to
-   * adopt that specific sandbox. Clears the column on ANY failure (deleted/
-   * expired sandbox, wrong status, nothing answering) so a later call for
-   * this session doesn't keep re-attempting a dead reference — see the
-   * schema.ts comment on this column for why it exists at all.
-   */
-  private async tryReattach(sessionId: string): Promise<SandboxStartResult | null> {
-    const db = getDb();
-    const [row] = await db
-      .select({ vercelSandboxId: sessions.vercelSandboxId })
-      .from(sessions)
-      .where(eq(sessions.id, sessionId));
-    const sandboxId = row?.vercelSandboxId;
-    if (!sandboxId) return null; // never had one — nothing stale to clear either.
-
-    const found = await probeExistingSandbox(sandboxId);
-    if (found) {
-      registry.set(sessionId, { sandbox: found.sandbox, url: found.url, state: "running" });
-      return { url: found.url };
-    }
-
-    try {
-      await db.update(sessions).set({ vercelSandboxId: null }).where(eq(sessions.id, sessionId));
-    } catch (err) {
-      console.error(
-        `[sandbox-vercel] failed to clear stale vercelSandboxId for session ${sessionId}`,
-        err
-      );
-    }
-    return null;
-  }
-
-  /** Fresh-create path used only by start() — reads the template off disk plus whatever's already in the `files` table (DB rows win on path collision: they're the newer, possibly agent-edited version). restoreFromSnapshot seeds createFresh from its own `files` param instead, since that snapshot already contains the full tree. */
+  /** Fresh-create path used only by start() — reads the template off disk plus whatever's already in the `files` table (DB rows win on path collision: they're the newer, possibly agent-edited version). restoreFromSnapshot seeds bootSandbox from its own `files` param instead, since that snapshot already contains the full tree. */
   private async buildInitialFileList(sessionId: string): Promise<SnapshotFile[]> {
     const templateFiles = readTemplateFilesRecursive();
     const dbFiles = await getSessionFiles(sessionId);
@@ -438,104 +410,135 @@ export class VercelSandboxProvider implements SandboxProvider {
     sessionId: string,
     options?: SandboxStartOptions
   ): Promise<SandboxStartResult> {
-    const reattached = await this.tryReattach(sessionId);
-    if (reattached) return reattached;
-
     const fileList = await this.buildInitialFileList(sessionId);
-    return this.createFresh(sessionId, fileList, options);
+    return this.bootSandbox(sessionId, fileList, options);
   }
 
   /**
-   * Creates a brand new sandbox and brings its dev server up — the Vercel
-   * analog of LocalProcessSandboxProvider.doStart (src/server/sandbox.ts).
-   * `fileList` is already resolved by the caller (buildInitialFileList for
-   * start(), the `files` param directly for restoreFromSnapshot) since the
-   * two callers seed it differently — see their doc comments.
+   * Gets-or-creates the sandbox and brings its dev server up — the Vercel
+   * analog of LocalProcessSandboxProvider.doStart (src/server/sandbox.ts),
+   * and the v2 replacement for the old createFresh: `Sandbox.getOrCreate`
+   * collapses what used to be a DB-id-reattach-then-create ladder into one
+   * call, since `name: sessionId` is itself the durable identity to look up
+   * by. `fileList` is already resolved by the caller (buildInitialFileList
+   * for start(), the `files` param directly for restoreFromSnapshot) since
+   * the two callers seed it differently — see their doc comments.
+   *
+   * File seeding + npm install only run inside `onCreate`, which
+   * getOrCreate only invokes for an actually-fresh sandbox (never a resumed
+   * one) — a resume's filesystem, node_modules included, is already on
+   * disk from before its last stop(). `created` tracks that distinction for
+   * the status-text/already-serving branches below, since getOrCreate
+   * itself doesn't otherwise tell the caller which path it took.
    *
    * Error-state registry entries below deliberately KEEP the `sandbox`
-   * reference (when one was actually created) rather than nulling it out.
-   * This matters: every call site in src/server/agent.ts that calls
-   * sandboxProvider.start() already calls sandboxProvider.stop(sessionId)
-   * on failure (its six `.catch(() => {})`'d stop() calls). Keeping the
-   * reference here means THAT stop() call finds a real sandbox to tear
-   * down instead of leaking a half-initialized, still-billing VM whose id
-   * never made it anywhere else once writeFiles/npm-install/dev-server
-   * fails partway through.
+   * reference (when one was actually created/retrieved) rather than
+   * nulling it out. This matters: every call site in src/server/agent.ts
+   * that calls sandboxProvider.start() already calls
+   * sandboxProvider.stop(sessionId) on failure (its six
+   * `.catch(() => {})`'d stop() calls). Keeping the reference here means
+   * THAT stop() call finds a real sandbox to tear down instead of leaking
+   * a half-initialized, still-billing VM whose onCreate failed partway
+   * through writeFiles/npm-install.
    */
-  private async createFresh(
+  private async bootSandbox(
     sessionId: string,
     fileList: SnapshotFile[],
     options?: SandboxStartOptions
   ): Promise<SandboxStartResult> {
     registry.set(sessionId, { sandbox: null, url: "", state: "starting" });
 
-    options?.onStatus?.("Creating the sandbox…");
+    let sandboxRef: Sandbox | null = null; // for error-path registry entries — see this method's doc comment
+    let created = false;
+
+    options?.onStatus?.("Preparing the sandbox…");
     let sandbox: Sandbox;
     try {
-      sandbox = await Sandbox.create({
+      sandbox = await Sandbox.getOrCreate({
+        name: sessionId, // stable identity — replaces sessions.vercelSandboxId
         ...resolveCredentials(),
         runtime: "node24",
         ports: [APP_PORT],
         timeout: SANDBOX_TIMEOUT_MS,
+        persistent: true,
+        keepLastSnapshots: { count: 1 },
+        snapshotExpiration: SNAPSHOT_EXPIRATION_MS,
+        resume: true,
         // No `env` — see this module's doc comment on env hygiene. Nothing
         // from this process's own environment (ANTHROPIC_API_KEY,
         // DATABASE_URL, Clerk/GitHub/Stripe/Vercel secrets) belongs inside
         // the generated app's runtime.
+        onCreate: async (sbx) => {
+          sandboxRef = sbx;
+          created = true;
+
+          // The session's own Postgres DATABASE_URL rides into the VM as a
+          // `.env.local` alongside the app files — it can't arrive via the
+          // file snapshot (src/server/files.ts deliberately excludes
+          // .env.local from the `files` table precisely so the secret
+          // never leaves the runtime), so it's injected here. Best-effort
+          // inside ensureSessionDatabase's own gating: unconfigured/failed
+          // provisioning just means no .env.local, never a failed sandbox.
+          // Runs only here, on a fresh create — a resumed sandbox's
+          // filesystem (.env.local included) is already sitting on disk
+          // from before its last stop().
+          try {
+            const databaseUrl = await ensureSessionDatabase(sessionId);
+            if (databaseUrl) {
+              fileList = [
+                ...fileList.filter((f) => f.path !== ".env.local"),
+                {
+                  path: ".env.local",
+                  content: `# Auto-generated — this app's own Postgres database. Not snapshotted or exported.\nDATABASE_URL=${databaseUrl}\n`,
+                },
+              ];
+            }
+          } catch (err) {
+            console.error(
+              `[sandbox-vercel] database provisioning for session ${sessionId} failed`,
+              err
+            );
+          }
+
+          options?.onStatus?.("Creating the sandbox…");
+          await sbx.writeFiles(
+            fileList.map((f) => ({ path: f.path, content: Buffer.from(f.content, "utf8") }))
+          );
+
+          options?.onStatus?.("Installing dependencies…");
+          const install = await sbx.runCommand({ cmd: "npm", args: ["install"] });
+          if (install.exitCode !== 0) {
+            // Mirrors LocalProcessSandboxProvider.doStart's npm-install
+            // failure shape (sandbox.ts) — same 1500-char tail, same "exit
+            // code in the message" framing.
+            const tail = await install.output("both").catch(() => "");
+            throw new Error(
+              `npm install exited with code ${install.exitCode}.${
+                tail.trim() ? `\n${tail.trim().slice(-1500)}` : ""
+              }`
+            );
+          }
+        },
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      registry.set(sessionId, { sandbox: null, url: "", state: "error", message });
-      throw new Error(`Failed to create the Vercel sandbox: ${message}`);
-    }
-
-    // Persist the id before anything else can fail — see this method's doc
-    // comment above on why error states below keep `sandbox` set. Best
-    // effort: a failure here only degrades a later restore from "reattach"
-    // to "create fresh" (see schema.ts's comment on this column) — it must
-    // not undo the sandbox we just successfully created for THIS request.
-    try {
-      const db = getDb();
-      await db
-        .update(sessions)
-        .set({ vercelSandboxId: sandbox.sandboxId })
-        .where(eq(sessions.id, sessionId));
-    } catch (err) {
-      console.error(
-        `[sandbox-vercel] failed to persist vercelSandboxId for session ${sessionId}`,
-        err
+      registry.set(sessionId, { sandbox: sandboxRef, url: "", state: "error", message });
+      throw new Error(
+        `Failed to ${created ? "initialize" : "get or create"} the Vercel sandbox: ${message}`
       );
     }
+    sandboxRef = sandbox;
 
-    try {
-      await sandbox.writeFiles(
-        fileList.map((f) => ({ path: f.path, content: Buffer.from(f.content, "utf8") }))
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      registry.set(sessionId, { sandbox, url: "", state: "error", message });
-      throw new Error(`Failed to write files into the sandbox: ${message}`);
+    const url = sandbox.domain(APP_PORT);
+    // A resumed-or-still-running sandbox may already be serving (e.g. another
+    // server process booted it) — starting a second dev server would just
+    // crash on the port.
+    if (!created && (await probeUrl(url, 2000))) {
+      registry.set(sessionId, { sandbox, url, state: "running" });
+      return { url };
     }
 
-    options?.onStatus?.("Installing dependencies…");
-    try {
-      const install = await sandbox.runCommand({ cmd: "npm", args: ["install"] });
-      if (install.exitCode !== 0) {
-        // Mirrors LocalProcessSandboxProvider.doStart's npm-install failure
-        // shape (sandbox.ts) — same 1500-char tail, same "exit code in the
-        // message" framing.
-        const tail = await install.output("both").catch(() => "");
-        throw new Error(
-          `npm install exited with code ${install.exitCode}.${
-            tail.trim() ? `\n${tail.trim().slice(-1500)}` : ""
-          }`
-        );
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      registry.set(sessionId, { sandbox, url: "", state: "error", message });
-      throw new Error(`npm install failed: ${message}`);
-    }
-
+    if (!created) options?.onStatus?.("Waking the sandbox…");
     options?.onStatus?.("Starting the dev server…");
     try {
       // detached: true — same reason as local's spawnDevServer: this is a
@@ -556,7 +559,6 @@ export class VercelSandboxProvider implements SandboxProvider {
       throw new Error(`Failed to start the dev server: ${message}`);
     }
 
-    const url = sandbox.domain(APP_PORT);
     const ready = await waitForUrlReady(url, 60_000);
     if (!ready) {
       const message = `Dev server on ${url} did not respond within 60s.`;
