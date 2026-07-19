@@ -529,13 +529,59 @@ export class VercelSandboxProvider implements SandboxProvider {
     }
     sandboxRef = sandbox;
 
+    // Resumed sandboxes get their .env.local refreshed too — onCreate above
+    // only covers fresh creates, but the credential can rotate while a
+    // snapshot sits stopped (observed live: a password reset on the Neon
+    // role left a resumed VM's baked .env.local failing with 28P01 while
+    // sessions.databaseUrl was current). Compared before writing because a
+    // CHANGED credential also forces a dev-server restart below — Next
+    // inside the VM was observed NOT reloading env-file changes on its own,
+    // so a running server would otherwise keep serving with the dead
+    // credential until the next stop/resume. Best-effort, same contract as
+    // the onCreate injection.
+    let envChanged = false;
+    if (!created) {
+      try {
+        const databaseUrl = await ensureSessionDatabase(sessionId);
+        if (databaseUrl) {
+          const desired = `# Auto-generated — this app's own Postgres database. Not snapshotted or exported.\nDATABASE_URL=${databaseUrl}\n`;
+          const current = await sandbox
+            .runCommand({ cmd: "cat", args: [".env.local"] })
+            .then((r) => r.output("stdout"))
+            .catch(() => "");
+          if (current !== desired) {
+            await sandbox.writeFiles([
+              { path: ".env.local", content: Buffer.from(desired, "utf8") },
+            ]);
+            envChanged = true;
+          }
+        }
+      } catch (err) {
+        console.error(
+          `[sandbox-vercel] refreshing .env.local for session ${sessionId} failed`,
+          err
+        );
+      }
+    }
+
     const url = sandbox.domain(APP_PORT);
     // A resumed-or-still-running sandbox may already be serving (e.g. another
     // server process booted it) — starting a second dev server would just
-    // crash on the port.
-    if (!created && (await probeUrl(url, 2000))) {
+    // crash on the port. Skipped when the credential just changed: that
+    // server is running with the stale env baked in, so fall through to the
+    // kill-and-restart below instead of adopting it.
+    if (!created && !envChanged && (await probeUrl(url, 2000))) {
       registry.set(sessionId, { sandbox, url, state: "running" });
       return { url };
+    }
+
+    // A stale-env server (envChanged) — or a half-dead one — may still hold
+    // the port; clear it before starting fresh. No-op when nothing is
+    // running.
+    if (!created) {
+      await sandbox
+        .runCommand({ cmd: "sh", args: ["-c", "pkill -f next || true; pkill -f 'npm run dev' || true"] })
+        .catch(() => {});
     }
 
     if (!created) options?.onStatus?.("Waking the sandbox…");

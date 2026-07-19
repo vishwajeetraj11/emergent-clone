@@ -16,6 +16,7 @@ import { sandboxProvider, seedSandboxTemplate, type SnapshotFile } from "@/serve
 import { getSessionFiles, snapshotSessionFiles } from "@/server/files";
 import { debitForJobUsage } from "@/server/credits";
 import { getProjectAgentContext } from "@/server/projects";
+import { isNeonConfigured, writeSandboxEnvFile } from "@/server/project-db";
 import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -164,6 +165,30 @@ You have Bash/Read/Glob/Grep tools. You have exactly one other tool, report_revi
 const DEBUG_SYSTEM_PROMPT = `You are the debugging agent inside an Emergent-style AI app builder. A code review just found issues in this working directory that need fixing.
 
 Fix each issue listed in your prompt. Read whatever files you need to understand the problem before changing anything. Keep \`npm run dev\` working — sanity-check with \`npm run build\` via Bash if you're unsure. Keep changes scoped to fixing the reported issues; do not refactor or add unrelated features.`;
+
+// ---------------------------------------------------------------------------
+// Per-app database notes, appended to the phase system prompts only when the
+// Neon integration is configured (src/server/project-db.ts). NEON_API_KEY is
+// read once per process, so module-scope evaluation is safe — and when it's
+// absent, every prompt is byte-identical to the pre-database behavior.
+// ---------------------------------------------------------------------------
+
+const PLANNER_DB_NOTE = `
+
+Database: every app built here gets its own dedicated Postgres database, reachable by the app's server-side code at runtime via process.env.DATABASE_URL. If the app needs persistence (accounts, saved items, submissions…), plan on real Postgres storage rather than in-memory or localStorage-only state — the builder agent knows how to wire it up.`;
+
+const BUILD_DB_NOTE = `
+
+Database: this app has its own dedicated Postgres database. Its connection string should already be in \`.env.local\` in the working directory as DATABASE_URL — \`next dev\` loads that file automatically, so server-side code can just use process.env.DATABASE_URL. If the app needs persistence: install a driver yourself via Bash (e.g. \`npm install postgres\`), create tables idempotently (CREATE TABLE IF NOT EXISTS) on first use, and query from server components / route handlers only — never from client components. If \`.env.local\` is missing, the database wasn't provisioned; build without persistence rather than inventing a connection string. Never print, hardcode, or commit the connection string, and never overwrite or delete \`.env.local\`.`;
+
+const REVIEW_DB_NOTE = `
+
+Note: a \`.env.local\` containing DATABASE_URL in the working directory is expected platform infrastructure (the app's own Postgres database) — its presence is not a finding, and code using process.env.DATABASE_URL server-side is correct. Never print that file's contents.`;
+
+/** Appends `note` when the per-app database integration is active. */
+function dbAware(prompt: string, note: string): string {
+  return isNeonConfigured() ? prompt + note : prompt;
+}
 
 const WHIMSICAL_STATUS_LINES = [
   "Making things click…",
@@ -553,7 +578,7 @@ async function runPlanQuery(
       model: PLANNER_MODEL,
       cwd,
       env: getAgentEnv(),
-      systemPrompt,
+      systemPrompt: dbAware(systemPrompt, PLANNER_DB_NOTE),
       maxTurns: MAX_ITERATIONS,
       tools: [], // no built-in tools at all (no Bash/Read/Write/Edit/WebFetch/...)
       mcpServers: { emergent: emergentServer },
@@ -802,7 +827,7 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
       model: BUILDER_MODEL,
       cwd,
       env: getAgentEnv(),
-      systemPrompt: BUILD_SYSTEM_PROMPT,
+      systemPrompt: dbAware(BUILD_SYSTEM_PROMPT, BUILD_DB_NOTE),
       maxTurns: BUILD_MAX_ITERATIONS,
       tools: BUILD_TOOLS,
       mcpServers: { emergent: emergentServer },
@@ -942,7 +967,7 @@ async function runReviewPhase(jobId: string, cwd: string): Promise<ReviewResult>
       model: BUILDER_MODEL,
       cwd,
       env: getAgentEnv(),
-      systemPrompt: REVIEW_SYSTEM_PROMPT,
+      systemPrompt: dbAware(REVIEW_SYSTEM_PROMPT, REVIEW_DB_NOTE),
       maxTurns: REVIEW_MAX_ITERATIONS,
       tools: REVIEW_TOOLS,
       mcpServers: { emergent: emergentServer },
@@ -1024,7 +1049,7 @@ async function runDebugPhase(jobId: string, cwd: string, review: ReviewResult): 
       model: BUILDER_MODEL,
       cwd,
       env: getAgentEnv(),
-      systemPrompt: DEBUG_SYSTEM_PROMPT,
+      systemPrompt: dbAware(DEBUG_SYSTEM_PROMPT, BUILD_DB_NOTE),
       maxTurns: DEBUG_MAX_ITERATIONS,
       tools: BUILD_TOOLS,
       mcpServers: {},
@@ -1169,6 +1194,16 @@ async function runBuildPhase(
   if (await isStopped(jobId)) return;
 
   const sandboxDir = seedSandboxTemplate(sessionId);
+
+  // The build/debug agents work in this LOCAL directory regardless of which
+  // preview provider is active, so its .env.local (the app's own
+  // DATABASE_URL — see project-db.ts) has to be written here explicitly:
+  // under the local provider doStart also writes it (harmless duplicate),
+  // but under the Vercel provider only the remote VM would otherwise get
+  // one, and the agent's own `next dev`-free checks (and the BUILD_DB_NOTE
+  // prompt's ".env.local should already be there" claim) would find nothing.
+  // Internally best-effort/no-op when Neon isn't configured.
+  await writeSandboxEnvFile(sessionId, sandboxDir);
 
   let previewUrl: string;
   try {

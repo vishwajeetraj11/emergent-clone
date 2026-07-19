@@ -1,3 +1,4 @@
+import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
@@ -27,6 +28,17 @@ export function isDatabaseConfigured(): boolean {
  */
 export function getDb(): Db {
   if (cached) return cached;
+
+  // Node's Happy-Eyeballs connect race (autoSelectFamily, default since
+  // Node 20) uses a 250ms per-address-family attempt budget — verified too
+  // short for some remote hosts on at least some networks (every attempt
+  // times out even though a single un-raced connect succeeds; first hit
+  // against Neon endpoints, both the API and Postgres itself). Raised here,
+  // inside the lazy init so module import stays side-effect free, because
+  // this is the first thing that runs before any remote DB connection.
+  // Process-global, so it also covers src/server/project-db.ts's fetch()es
+  // and every per-app connection. Safe no-op for a localhost DATABASE_URL.
+  setDefaultAutoSelectFamilyAttemptTimeout(1500);
 
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {

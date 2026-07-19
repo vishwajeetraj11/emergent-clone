@@ -11,6 +11,7 @@ import path from "node:path";
 // before this module has finished initializing it. See sandbox-vercel.ts's
 // own imports for the other half of this.
 import { isVercelSandboxConfigured, VercelSandboxProvider } from "./sandbox-vercel";
+import { writeSandboxEnvFile } from "./project-db";
 
 // ---------------------------------------------------------------------------
 // Phase 2 sandbox: SandboxProvider interface + LocalProcessSandboxProvider.
@@ -517,6 +518,12 @@ export class LocalProcessSandboxProvider implements SandboxProvider {
       state: "starting",
       devLogTail: "",
     });
+
+    // Provision (or look up) this session's own Postgres database and drop
+    // its DATABASE_URL into the sandbox's .env.local before the dev server
+    // spawns — `next dev` loads it natively. Internally best-effort/no-op
+    // when Neon isn't configured or provisioning fails (see project-db.ts).
+    await writeSandboxEnvFile(sessionId, dir);
 
     options?.onStatus?.("Installing dependencies…");
     try {

@@ -4,6 +4,7 @@ import { files as filesTable, jobs, sessions } from "@/db/schema";
 import { appendEvent } from "@/server/events";
 import { getSessionFiles } from "@/server/files";
 import { runAgentLoop } from "@/server/agent";
+import { ensureSessionDatabase } from "@/server/project-db";
 import { getSandboxDir, writeSnapshotFiles } from "@/server/sandbox";
 import type { JobRow, SessionRow } from "@/server/jobs";
 
@@ -110,6 +111,18 @@ export async function forkSession(sessionId: string): Promise<{
     // not a copy of the original's on-disk directory, so a since-orphaned or
     // never-started original doesn't block the fork from getting real files.
     writeSnapshotFiles(getSandboxDir(forked.id), originalFiles);
+  }
+
+  // If the original session has its own database (Neon branch), branch the
+  // fork's database off it NOW — a Neon branch is a copy-on-write snapshot
+  // taken at creation time, so doing this eagerly (rather than lazily on the
+  // fork's first sandbox start, which ensureSessionDatabase would otherwise
+  // do) pins the fork's data to the moment of the fork, matching the file
+  // copy above. Best-effort: a database hiccup must not fail the fork.
+  if (original.neonBranchId) {
+    await ensureSessionDatabase(forked.id).catch((err) => {
+      console.error(`[project-db] forking database for session ${forked.id} failed`, err);
+    });
   }
 
   const [job] = await db.insert(jobs).values({ sessionId: forked.id, status: "done" }).returning();
