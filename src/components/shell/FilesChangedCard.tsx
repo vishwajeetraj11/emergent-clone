@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ChevronDown, ChevronRight, FileText } from "lucide-react";
+import { fetchJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface SessionFile {
@@ -37,9 +38,7 @@ export function FilesChangedCard({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/files`);
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      const all = (await res.json()) as SessionFile[];
+      const all = await fetchJson<SessionFile[]>(`/api/sessions/${sessionId}/files`);
       const byPath = new Map(all.map((f) => [f.path, f]));
       const shown = paths
         .map((p) => byPath.get(p))

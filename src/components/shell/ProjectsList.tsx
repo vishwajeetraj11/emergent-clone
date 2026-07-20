@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Trash2 } from "lucide-react";
+import { fetchJson } from "@/lib/api";
+import { formatDate } from "@/lib/format";
 
 interface ProjectListItem {
   id: string;
@@ -41,10 +43,9 @@ export function ProjectsList({
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/projects")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { projects?: ProjectListItem[] } | null) => {
-        if (!cancelled) setProjects(data?.projects ?? []);
+    fetchJson<{ projects?: ProjectListItem[] }>("/api/projects")
+      .then((data) => {
+        if (!cancelled) setProjects(data.projects ?? []);
       })
       .catch(() => {
         if (!cancelled) setProjects([]);
@@ -62,11 +63,7 @@ export function ProjectsList({
     setDeletingId(id);
     setDeleteError(null);
     try {
-      const res = await fetch(`/api/projects/${id}`, { method: "DELETE" });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? `Request failed (${res.status})`);
-      }
+      await fetchJson(`/api/projects/${id}`, { method: "DELETE" });
       setProjects((prev) => prev?.filter((p) => p.id !== id) ?? prev);
       setConfirmingId(null);
       if (currentProjectId === id) onNavigateHome?.();
@@ -130,7 +127,7 @@ export function ProjectsList({
             ) : (
               <div className="flex shrink-0 items-center gap-2">
                 <span className="text-xs text-muted-foreground">
-                  {new Date(p.createdAt).toLocaleDateString()}
+                  {formatDate(p.createdAt)}
                 </span>
                 <button
                   type="button"
