@@ -8,6 +8,7 @@ import type {
   TimelineEvent,
   TimelineEventType,
 } from "@/lib/types";
+import { loadUserApiKeys } from "@/lib/user-keys-storage";
 
 export type SaveState =
   | "idle"
@@ -103,6 +104,19 @@ function canStopPreview(session: {
     session.previewUrl !== null &&
     (session.jobStatus === null || TERMINAL_JOB_STATUSES.has(session.jobStatus))
   );
+}
+
+/**
+ * BYOK: the `apiKeys` field for a job-start POST body (start/continueChat
+ * below) — reads whatever's in this tab's sessionStorage right now (see
+ * src/lib/user-keys-storage.ts) and returns an object with an `apiKeys` key
+ * ONLY when at least one provider key is actually stored. Spread with `...`
+ * at each call site so a non-BYOK user's request body stays byte-identical
+ * to before this feature existed (no empty `apiKeys: {}` riding along).
+ */
+function byokBodyField() {
+  const stored = loadUserApiKeys();
+  return stored.anthropic || stored.openai ? { apiKeys: stored } : {};
 }
 
 const INITIAL_STATE: AgentSessionState = {
@@ -420,7 +434,7 @@ export function useAgentSession() {
         const res = await fetch("/api/projects", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, ...(model ? { model } : {}) }),
+          body: JSON.stringify({ prompt, ...(model ? { model } : {}), ...byokBodyField() }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
@@ -660,7 +674,7 @@ export function useAgentSession() {
         const res = await fetch(`/api/sessions/${sessionId}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, planMode, ...(model ? { model } : {}) }),
+          body: JSON.stringify({ prompt, planMode, ...(model ? { model } : {}), ...byokBodyField() }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));

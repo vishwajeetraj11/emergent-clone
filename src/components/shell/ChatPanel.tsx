@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   GitFork,
@@ -29,10 +29,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Timeline } from "@/components/shell/Timeline";
+import { ApiKeysPopover } from "@/components/shell/ApiKeysPopover";
 import { useSpeechRecognition } from "@/lib/hooks/useSpeechRecognition";
 import { cn } from "@/lib/utils";
 import type { AnswerItem, JobStatus, TimelineEvent } from "@/lib/types";
 import type { DeployState, SaveState } from "@/lib/hooks/useAgentSession";
+import { loadUserApiKeys, type UserApiKeys } from "@/lib/user-keys-storage";
 
 interface SessionSummary {
   id: string;
@@ -324,14 +326,27 @@ interface ModelOption {
   id: string;
   label: string;
   provider: string;
+  /** True when the platform itself configured this provider's env key (see src/app/api/models/route.ts). A model with this false is still shown when the user has a BYOK key for its provider — see userHasKeyFor below. */
+  platformConfigured: boolean;
+}
+
+/** provider is a loose `string` on ModelOption (client code, see src/lib/user-keys-storage.ts's doc comment on why this file doesn't import the server's ModelProvider type) — this is the BYOK-aware half of "is this model usable", mirroring src/server/llm.ts's providerAvailable. */
+function userHasKeyFor(keys: UserApiKeys, provider: string): boolean {
+  if (provider === "anthropic") return Boolean(keys.anthropic);
+  if (provider === "openai") return Boolean(keys.openai);
+  return false;
 }
 
 /**
- * Per-message model picker — options come from GET /api/models (the server
- * filters the catalog to providers whose API key is actually configured, see
- * src/server/llm.ts). The chosen id rides the message POST body and runs
- * that job's build/review/debug passes; the planner model is never
- * user-selected. Renders nothing when no provider is configured at all.
+ * Per-message model picker — options come from GET /api/models, which now
+ * returns EVERY builder-tier catalog entry plus a `platformConfigured` flag
+ * per model (see src/app/api/models/route.ts) rather than pre-filtering:
+ * the server never sees the user's BYOK key (src/lib/user-keys-storage.ts),
+ * so final visibility is decided here, client-side — platformConfigured ||
+ * a stored key for that model's provider (see ChatPanel's userKeys state).
+ * The chosen id rides the message POST body and runs that job's
+ * build/review/debug passes; the planner model is never user-selected.
+ * Renders nothing when no model is visible at all.
  */
 function ModelPicker({
   models,
@@ -440,25 +455,47 @@ export function ChatPanel({
   // full Opus-plan -> approve -> Sonnet-build pipeline instead of today's
   // direct-edit default. See src/server/agent.ts's runContinuationFlow.
   const [planMode, setPlanMode] = useState(false);
-  // Per-message model choice (see ModelPicker above). Defaults to the
-  // server's defaultId once /api/models loads; empty list = picker hidden
-  // and no model field sent (server falls back on its own).
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
-  const [model, setModel] = useState<string | null>(null);
+  // Per-message model choice (see ModelPicker above). `allModels` +
+  // `serverDefaultId` are the raw GET /api/models response; `userKeys` is
+  // this tab's stored BYOK keys (see src/lib/user-keys-storage.ts), lifted
+  // here so ApiKeysPopover's Save/Clear (onChange below) can trigger a
+  // re-filter. `manualModel` is the ONLY real state — null until the user
+  // actively picks something via ModelPicker's onChange; `model` itself is
+  // a pure derived value (below), never written to directly, so there's no
+  // effect synchronizing it against `modelOptions`/`serverDefaultId`.
+  const [allModels, setAllModels] = useState<ModelOption[]>([]);
+  const [serverDefaultId, setServerDefaultId] = useState<string | null>(null);
+  const [userKeys, setUserKeys] = useState<UserApiKeys>(() => loadUserApiKeys());
+  const [manualModel, setManualModel] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     fetch("/api/models")
       .then((res) => (res.ok ? res.json() : { models: [], defaultId: null }))
       .then((data: { models?: ModelOption[]; defaultId?: string | null }) => {
         if (cancelled) return;
-        setModelOptions(data.models ?? []);
-        setModel((prev) => prev ?? data.defaultId ?? null);
+        setAllModels(data.models ?? []);
+        setServerDefaultId(data.defaultId ?? null);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, []);
+  const modelOptions = useMemo(
+    () => allModels.filter((m) => m.platformConfigured || userHasKeyFor(userKeys, m.provider)),
+    [allModels, userKeys]
+  );
+  // Stays pointed at a currently-visible option: the user's own pick
+  // (manualModel) when it's still visible, else the server's defaultId when
+  // THAT'S visible, else the first visible model, else null (picker
+  // hidden). Recomputed on every render from modelOptions/serverDefaultId —
+  // including right after the popover saves/clears a key — with no state
+  // (and no effect) of its own.
+  const model = useMemo(() => {
+    if (manualModel && modelOptions.some((m) => m.id === manualModel)) return manualModel;
+    if (serverDefaultId && modelOptions.some((m) => m.id === serverDefaultId)) return serverDefaultId;
+    return modelOptions[0]?.id ?? null;
+  }, [manualModel, modelOptions, serverDefaultId]);
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
   // Text already in the composer when listening starts — interim/final
   // speech results are appended after this, not appended to each other, so
@@ -672,10 +709,11 @@ export function ChatPanel({
               />
             </div>
             <div className="flex items-center gap-2">
+            <ApiKeysPopover onChange={setUserKeys} />
             <ModelPicker
               models={modelOptions}
               value={model}
-              onChange={setModel}
+              onChange={setManualModel}
               disabled={composerDisabled}
             />
             {canContinueChat && (
