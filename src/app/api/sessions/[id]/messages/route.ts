@@ -21,7 +21,7 @@ export async function POST(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  let body: { prompt?: unknown; planMode?: unknown };
+  let body: { prompt?: unknown; planMode?: unknown; model?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -33,9 +33,12 @@ export async function POST(
     return NextResponse.json({ error: "prompt is required" }, { status: 400 });
   }
   const planMode = body.planMode === true;
+  // Validated later against the model catalog (resolveBuilderModel) — an
+  // unknown/unavailable id just falls back to the default, never errors.
+  const model = typeof body.model === "string" ? body.model : undefined;
 
   try {
-    const { job } = await continueSessionWithPrompt(sessionId, prompt, planMode);
+    const { job } = await continueSessionWithPrompt(sessionId, prompt, planMode, model);
     return NextResponse.json({ job: { id: job.id, status: job.status } });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

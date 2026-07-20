@@ -42,7 +42,7 @@ async function ensureDevUser() {
  * acceptable for Phase 1; a durable queue/worker is out of scope until a
  * later phase.
  */
-export async function createProjectAndJob(prompt: string) {
+export async function createProjectAndJob(prompt: string, model?: string) {
   const db = getDb();
 
   // Phase 3: isClerkConfigured() gates which user this project is owned by.
@@ -96,7 +96,13 @@ export async function createProjectAndJob(prompt: string) {
     .values({ sessionId: session.id, status: "running" })
     .returning();
 
-  await appendEvent(job.id, "user", "user_message", { text: trimmed });
+  // `model` rides the user_message payload exactly like planMode does on the
+  // continuation path (src/server/sessions.ts) — runRealLoop reads it back
+  // and validates it against the catalog (resolveBuilderModel).
+  await appendEvent(job.id, "user", "user_message", {
+    text: trimmed,
+    ...(model ? { model } : {}),
+  });
 
   // Fire-and-forget: intentionally not awaited. See the Phase 1 limitation
   // note above.

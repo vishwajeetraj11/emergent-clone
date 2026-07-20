@@ -34,7 +34,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  let body: { prompt?: unknown };
+  let body: { prompt?: unknown; model?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -45,9 +45,12 @@ export async function POST(request: Request) {
   if (!prompt) {
     return NextResponse.json({ error: "prompt is required" }, { status: 400 });
   }
+  // Validated later against the model catalog (resolveBuilderModel) — an
+  // unknown/unavailable id just falls back to the default, never errors.
+  const model = typeof body.model === "string" ? body.model : undefined;
 
   try {
-    const { project, session, job } = await createProjectAndJob(prompt);
+    const { project, session, job } = await createProjectAndJob(prompt, model);
     return NextResponse.json({
       project: {
         id: project.id,

@@ -408,7 +408,7 @@ export function useAgentSession() {
   }, [state.sessionId, attemptRestorePreview]);
 
   const start = useCallback(
-    async (prompt: string, onCreated?: (projectId: string) => void) => {
+    async (prompt: string, onCreated?: (projectId: string) => void, model?: string) => {
       // A brand-new project discards whatever session/preview was
       // previously loaded (see the previewUrl: null reset below) — stop
       // its sandbox first so it isn't left running unattended.
@@ -420,7 +420,7 @@ export function useAgentSession() {
         const res = await fetch("/api/projects", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt }),
+          body: JSON.stringify({ prompt, ...(model ? { model } : {}) }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
@@ -652,7 +652,7 @@ export function useAgentSession() {
    * layer on top through the normal SSE handling.
    */
   const continueChat = useCallback(
-    async (prompt: string, planMode = false) => {
+    async (prompt: string, planMode = false, model?: string) => {
       const sessionId = state.sessionId;
       if (!sessionId) return;
       setState((prev) => ({ ...prev, isSendingMessage: true, error: null }));
@@ -660,7 +660,7 @@ export function useAgentSession() {
         const res = await fetch(`/api/sessions/${sessionId}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, planMode }),
+          body: JSON.stringify({ prompt, planMode, ...(model ? { model } : {}) }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));

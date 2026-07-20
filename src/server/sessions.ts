@@ -40,7 +40,8 @@ export async function getSession(sessionId: string): Promise<SessionRow | null> 
 export async function continueSessionWithPrompt(
   sessionId: string,
   prompt: string,
-  planMode = false
+  planMode = false,
+  model?: string
 ): Promise<{ session: SessionRow; job: JobRow }> {
   const db = getDb();
   const trimmed = prompt.trim();
@@ -54,7 +55,11 @@ export async function continueSessionWithPrompt(
   }
 
   const [job] = await db.insert(jobs).values({ sessionId, status: "running" }).returning();
-  await appendEvent(job.id, "user", "user_message", { text: trimmed, planMode });
+  await appendEvent(job.id, "user", "user_message", {
+    text: trimmed,
+    planMode,
+    ...(model ? { model } : {}),
+  });
 
   // Fire-and-forget, same pattern/limitation as createProjectAndJob.
   runAgentLoop(job.id).catch((err) => {

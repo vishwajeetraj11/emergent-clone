@@ -320,6 +320,63 @@ function StatusStrip({ jobStatus }: { jobStatus: JobStatus | null }) {
 
 const TERMINAL_STATUSES = new Set<JobStatus>(["done", "stopped", "failed"]);
 
+interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+}
+
+/**
+ * Per-message model picker — options come from GET /api/models (the server
+ * filters the catalog to providers whose API key is actually configured, see
+ * src/server/llm.ts). The chosen id rides the message POST body and runs
+ * that job's build/review/debug passes; the planner model is never
+ * user-selected. Renders nothing when no provider is configured at all.
+ */
+function ModelPicker({
+  models,
+  value,
+  onChange,
+  disabled,
+}: {
+  models: ModelOption[];
+  value: string | null;
+  onChange: (id: string) => void;
+  disabled?: boolean;
+}) {
+  if (models.length === 0) return null;
+  const current = models.find((m) => m.id === value) ?? models[0];
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="Choose model"
+        disabled={disabled}
+        className="flex items-center gap-1 rounded-full border border-border px-2 py-1 text-[0.7rem] font-medium text-muted-foreground transition-colors hover:bg-secondary disabled:pointer-events-none disabled:opacity-40"
+      >
+        {current.label}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-52">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Model for this message</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {models.map((m) => (
+            <DropdownMenuItem
+              key={m.id}
+              onSelect={() => onChange(m.id)}
+              className={cn("text-xs", m.id === current.id && "bg-secondary")}
+            >
+              <span className="flex-1">{m.label}</span>
+              <span className="text-[0.65rem] uppercase text-muted-foreground">
+                {m.provider}
+              </span>
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function ChatPanel({
   events,
   jobStatus,
@@ -362,7 +419,7 @@ export function ChatPanel({
   deployState?: DeployState;
   deployMessage?: string | null;
   deployUrl?: string | null;
-  onSubmitPrompt: (prompt: string) => void;
+  onSubmitPrompt: (prompt: string, model?: string) => void;
   onAnswerQuestion: (toolUseId: string, answers: AnswerItem[]) => void;
   /** The user's approve/revise response to a `plan` event (PlanCard, via Timeline). */
   onPlanDecision?: (
@@ -371,7 +428,7 @@ export function ChatPanel({
     feedback?: string
   ) => void;
   onStop: () => void;
-  onContinueChat?: (prompt: string, planMode?: boolean) => void;
+  onContinueChat?: (prompt: string, planMode?: boolean, model?: string) => void;
   onFork?: () => void;
   onSwitchSession?: (sessionId: string, job: { id: string; status: JobStatus } | null) => void;
   onSave?: () => void;
@@ -383,6 +440,25 @@ export function ChatPanel({
   // full Opus-plan -> approve -> Sonnet-build pipeline instead of today's
   // direct-edit default. See src/server/agent.ts's runContinuationFlow.
   const [planMode, setPlanMode] = useState(false);
+  // Per-message model choice (see ModelPicker above). Defaults to the
+  // server's defaultId once /api/models loads; empty list = picker hidden
+  // and no model field sent (server falls back on its own).
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [model, setModel] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/models")
+      .then((res) => (res.ok ? res.json() : { models: [], defaultId: null }))
+      .then((data: { models?: ModelOption[]; defaultId?: string | null }) => {
+        if (cancelled) return;
+        setModelOptions(data.models ?? []);
+        setModel((prev) => prev ?? data.defaultId ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
   // Text already in the composer when listening starts — interim/final
   // speech results are appended after this, not appended to each other, so
@@ -421,9 +497,9 @@ export function ChatPanel({
     const trimmed = message.trim();
     if (!trimmed || composerDisabled) return;
     if (hasProject) {
-      onContinueChat?.(trimmed, planMode);
+      onContinueChat?.(trimmed, planMode, model ?? undefined);
     } else {
-      onSubmitPrompt(trimmed);
+      onSubmitPrompt(trimmed, model ?? undefined);
     }
     setMessage("");
   }
@@ -596,6 +672,12 @@ export function ChatPanel({
               />
             </div>
             <div className="flex items-center gap-2">
+            <ModelPicker
+              models={modelOptions}
+              value={model}
+              onChange={setModel}
+              disabled={composerDisabled}
+            />
             {canContinueChat && (
               <Tooltip>
                 <TooltipTrigger
@@ -613,7 +695,7 @@ export function ChatPanel({
                 </TooltipTrigger>
                 <TooltipContent>
                   {planMode
-                    ? "This message will be planned (Opus) and shown for approval before anything is built."
+                    ? "This message will be planned and shown for approval before anything is built."
                     : "This message will be built directly. Toggle to Plan mode to review a plan first."}
                 </TooltipContent>
               </Tooltip>

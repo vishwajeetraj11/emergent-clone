@@ -62,7 +62,7 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
           deployState={session.deployState}
           deployMessage={session.deployMessage}
           deployUrl={session.deployUrl}
-          onSubmitPrompt={(prompt) => session.start(prompt, handleCreated)}
+          onSubmitPrompt={(prompt, model) => session.start(prompt, handleCreated, model)}
           onAnswerQuestion={session.answerQuestion}
           onPlanDecision={session.decidePlan}
           onStop={session.stop}
