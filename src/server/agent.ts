@@ -3,15 +3,19 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { z } from "zod";
-import {
-  createSdkMcpServer,
-  query,
-  tool,
-  type SDKResultError,
-} from "@anthropic-ai/claude-agent-sdk";
 import { appendEvent, getAllEvents, type EventRow } from "@/server/events";
-import { getJob, setAgentSessionId, setJobStatus } from "@/server/jobs";
+import { getJob, setJobStatus } from "@/server/jobs";
+import {
+  runAgentQuery,
+  resolvePlannerModel,
+  resolveBuilderModel,
+} from "@/server/llm";
+import {
+  buildFileTools,
+  buildAskUserTool,
+  buildReportReviewTool,
+  type ReviewResult,
+} from "@/server/agent-tools";
 import { sandboxProvider, seedSandboxTemplate, type SnapshotFile } from "@/server/sandbox";
 import { getSessionFiles, snapshotSessionFiles } from "@/server/files";
 import { debitForJobUsage } from "@/server/credits";
@@ -82,8 +86,11 @@ import type { AnswerItem, Question } from "@/lib/types";
 // scripted plan is approved — it does not simulate a real build.
 // ---------------------------------------------------------------------------
 
-const PLANNER_MODEL = "claude-opus-4-8";
-const BUILDER_MODEL = "claude-sonnet-5"; // build, review, and debug — always
+// Model selection lives in src/server/llm.ts now: the planner is
+// resolvePlannerModel() (Opus when Anthropic is configured, else the
+// flagship OpenAI model — never user-selected), and the builder model comes
+// from the job's user_message payload via resolveBuilderModel() (the user's
+// per-message picker choice; runs that job's build + review + debug).
 
 const MAX_ITERATIONS = 15;
 const MAX_PLAN_REVISIONS = 5;
@@ -244,51 +251,31 @@ function isMockMode(): boolean {
   return process.env.MOCK_AGENT === "1";
 }
 
-// ---------------------------------------------------------------------------
-// Production credential swap point.
-//
-// Returns `undefined` when ANTHROPIC_API_KEY is not set in the server's own
-// process environment — the SDK's `query()` then omits `options.env`
-// entirely, so the subprocess inherits this process's shell environment and
-// falls through to the local `claude` CLI's own login (Claude Code
-// subscription auth). This is the default, always-tested path in this
-// environment: no ANTHROPIC_API_KEY is set here, so every call site below
-// passes `env: getAgentEnv()` === `env: undefined`, which is exactly what
-// those call sites did before this function existed (they simply didn't set
-// `env` at all).
-//
-// Returns `{ ...process.env, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }`
-// only once a real, centrally-held key is configured for a production
-// deploy. No other code changes are needed to swap credential sources: this
-// is the one function a production deployment's ops config needs to make
-// true.
-// ---------------------------------------------------------------------------
-function getAgentEnv(): Record<string, string | undefined> | undefined {
-  if (!process.env.ANTHROPIC_API_KEY) return undefined;
-  return { ...process.env, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY };
-}
-
 /**
  * Appends a `usage` event and, right after, debits the job owner's credit
  * ledger for that usage — see src/server/credits.ts for the cost model.
  * Centralizes every call site so they can't drift out of sync with each
  * other. Takes the actual model used for this call (planner vs builder use
  * different, differently-priced models) rather than assuming one flat rate.
+ * `cachedInputTokens` (a subset of inputTokens served from prompt cache) is
+ * billed at the model's much cheaper cache-read rate.
  */
 async function recordUsage(
   jobId: string,
   step: string,
   model: string,
   inputTokens: number,
-  outputTokens: number
+  outputTokens: number,
+  cachedInputTokens = 0
 ): Promise<void> {
   await appendEvent(jobId, "system", "usage", {
     model,
     inputTokens,
     outputTokens,
+    cachedInputTokens,
     step,
   });
-  await debitForJobUsage(jobId, step, model, inputTokens, outputTokens);
+  await debitForJobUsage(jobId, step, model, inputTokens, outputTokens, cachedInputTokens);
 }
 
 // Prevents a duplicate concurrent run of the same job within this process
@@ -482,71 +469,16 @@ async function waitForAnswer(
   }
 }
 
-function buildAskUserTool(jobId: string) {
-  return tool(
-    "ask_user",
-    "Ask the user 3-5 clarifying questions about the app they want built, each with 2-6 short suggested options. Call this exactly once, on your first turn, before writing any plan or doing anything else.",
-    {
-      questions: z
-        .array(
-          z.object({
-            question: z.string().min(1),
-            options: z.array(z.string().min(1)).min(2).max(6),
-          })
-        )
-        .min(3)
-        .max(5)
-        .describe("3-5 clarifying questions, each with 2-6 short suggested options"),
-    },
-    async (args) => {
-      const toolUseId = randomUUID();
-      const questions = normalizeQuestions(args.questions);
-
-      await appendEvent(jobId, "assistant", "tool_call", {
-        id: toolUseId,
-        name: "ask_user",
-        input: { questions },
-      });
-      await appendEvent(jobId, "assistant", "question", {
-        toolUseId,
-        questions,
-      });
-      await setJobStatus(jobId, "waiting_on_user");
-
-      const answers = await waitForAnswer(jobId, toolUseId);
-
-      if (answers === null) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "The job was stopped before the user answered.",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      return {
-        content: [
-          { type: "text" as const, text: formatAnswersAsToolResult(answers) },
-        ],
-      };
-    }
-  );
-}
-
-function describeResultError(message: SDKResultError, maxTurns: number): string {
-  if (message.subtype === "error_max_turns") {
-    return `Reached the maximum of ${maxTurns} agent iterations for this job.`;
-  }
-  if (message.subtype === "error_max_budget_usd") {
-    return "Reached the maximum budget for this job.";
-  }
-  if (message.errors.length > 0) {
-    return message.errors.join("; ");
-  }
-  return `Agent run failed (${message.subtype}).`;
+/** The blocking ask_user tool, wired to this module's event/poll helpers — see buildAskUserTool in agent-tools.ts for why deps are injected. */
+function askUserToolFor(jobId: string) {
+  return buildAskUserTool({
+    jobId,
+    appendEvent,
+    setJobStatus,
+    waitForAnswer,
+    normalizeQuestions,
+    formatAnswersAsToolResult,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -559,89 +491,53 @@ interface PlanQueryResult {
   askUserCalled: boolean;
 }
 
-/** One planner query() call — either the initial scoping pass or a single revision pass. */
+/** One planner run — either the initial scoping pass or a single revision pass. The ask_user tool is the ONLY tool available. */
 async function runPlanQuery(
   jobId: string,
-  cwd: string,
+  _cwd: string,
   systemPrompt: string,
   userPrompt: string
 ): Promise<PlanQueryResult> {
-  const emergentServer = createSdkMcpServer({
-    name: "emergent",
-    version: "1.0.0",
-    tools: [buildAskUserTool(jobId)],
-  });
-
-  const q = query({
-    prompt: userPrompt,
-    options: {
-      model: PLANNER_MODEL,
-      cwd,
-      env: getAgentEnv(),
-      systemPrompt: dbAware(systemPrompt, PLANNER_DB_NOTE),
-      maxTurns: MAX_ITERATIONS,
-      tools: [], // no built-in tools at all (no Bash/Read/Write/Edit/WebFetch/...)
-      mcpServers: { emergent: emergentServer },
-      allowedTools: ["mcp__emergent__ask_user"], // the ONLY tool the model can use
-      strictMcpConfig: true, // ignore project .mcp.json / other MCP config
-      settingSources: [], // ignore filesystem settings (user/project/local)
-      permissionMode: "default",
-    },
-  });
-
+  const plannerModel = resolvePlannerModel();
   let askUserCalled = false;
-  let sessionId: string | undefined;
   const planTextParts: string[] = [];
 
-  for await (const message of q) {
-    if (await isStopped(jobId)) {
-      q.close();
-      return { planText: "", askUserCalled };
-    }
+  try {
+    const result = await runAgentQuery({
+      modelId: plannerModel,
+      system: dbAware(systemPrompt, PLANNER_DB_NOTE),
+      prompt: userPrompt,
+      tools: { ask_user: askUserToolFor(jobId) },
+      maxSteps: MAX_ITERATIONS,
+      onText: async (text, stepId) => {
+        planTextParts.push(text);
+        await appendEvent(jobId, "assistant", "assistant_message", { text, stepId });
+      },
+      onToolCall: async (call) => {
+        // ask_user's tool_call/question events are appended by its own
+        // execute handler (agent-tools.ts) — only note that it was called.
+        if (call.name === "ask_user") askUserCalled = true;
+      },
+      shouldAbort: () => isStopped(jobId),
+    });
 
-    if (message.type === "assistant") {
-      let blockIndex = 0;
-      for (const block of message.message.content) {
-        if (block.type === "text" && block.text.trim()) {
-          planTextParts.push(block.text);
-          await appendEvent(jobId, "assistant", "assistant_message", {
-            text: block.text,
-            stepId: message.uuid,
-            blockIndex: blockIndex++,
-          });
-        } else if (block.type === "tool_use") {
-          // The ask_user tool_call/question events are appended by the tool
-          // handler itself (buildAskUserTool) — nothing to do here besides
-          // note that the model did in fact call it.
-          askUserCalled = true;
-          blockIndex++;
-        }
-      }
-      continue;
-    }
-
-    if (message.type === "result") {
-      sessionId = message.session_id;
-      await recordUsage(
-        jobId,
-        "plan_query",
-        PLANNER_MODEL,
-        message.usage.input_tokens,
-        message.usage.output_tokens
-      );
-
-      if (message.subtype !== "success") {
-        await appendEvent(jobId, "system", "error", {
-          message: describeResultError(message, MAX_ITERATIONS),
-        });
-        await setJobStatus(jobId, "failed");
-        if (sessionId) await setAgentSessionId(jobId, sessionId);
-        return { planText: "", askUserCalled };
-      }
-    }
+    await recordUsage(
+      jobId,
+      "plan_query",
+      plannerModel,
+      result.usage.inputTokens,
+      result.usage.outputTokens,
+      result.usage.cachedInputTokens
+    );
+    if (result.aborted) return { planText: "", askUserCalled };
+  } catch (err) {
+    await appendEvent(jobId, "system", "error", {
+      message: `Planning failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
+    await setJobStatus(jobId, "failed");
+    return { planText: "", askUserCalled };
   }
 
-  if (sessionId) await setAgentSessionId(jobId, sessionId);
   return { planText: planTextParts.join("\n\n"), askUserCalled };
 }
 
@@ -750,55 +646,30 @@ Write a revised plan.`;
  * planner model since it's narrating the plan, not writing code. Does not
  * set job status; the build phase that follows owns the terminal status.
  */
-async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
-  const q = query({
+async function runSummaryQuery(jobId: string, _cwd: string): Promise<void> {
+  const plannerModel = resolvePlannerModel();
+  const result = await runAgentQuery({
+    modelId: plannerModel,
+    system: SYSTEM_PROMPT,
     prompt:
       "The plan has been approved. Write a brief (2-3 sentence) closing summary for the user of what you'll build next. Plain text only — no code, no tool calls.",
-    options: {
-      model: PLANNER_MODEL,
-      cwd,
-      env: getAgentEnv(),
-      systemPrompt: SYSTEM_PROMPT,
-      maxTurns: 1,
-      tools: [],
-      mcpServers: {},
-      allowedTools: [],
-      strictMcpConfig: true,
-      settingSources: [],
-      permissionMode: "default",
-    },
+    maxSteps: 1,
+    shouldAbort: () => isStopped(jobId),
   });
 
-  let summaryText = "";
+  await recordUsage(
+    jobId,
+    "summary_query",
+    plannerModel,
+    result.usage.inputTokens,
+    result.usage.outputTokens,
+    result.usage.cachedInputTokens
+  );
 
-  for await (const message of q) {
-    if (message.type === "assistant") {
-      for (const block of message.message.content) {
-        if (block.type === "text" && block.text.trim()) {
-          summaryText += (summaryText ? "\n" : "") + block.text;
-        }
-      }
-      continue;
-    }
-
-    if (message.type === "result") {
-      await recordUsage(
-        jobId,
-        "summary_query",
-        PLANNER_MODEL,
-        message.usage.input_tokens,
-        message.usage.output_tokens
-      );
-      if (message.subtype !== "success") {
-        throw new Error(describeResultError(message, 1));
-      }
-    }
-  }
-
-  if (await isStopped(jobId)) return;
+  if (result.aborted || (await isStopped(jobId))) return;
 
   await appendEvent(jobId, "assistant", "assistant_message", {
-    text: summaryText.trim() || "Plan approved — starting the build now.",
+    text: result.text.trim() || "Plan approved — starting the build now.",
   });
 }
 
@@ -814,96 +685,41 @@ async function runSummaryQuery(jobId: string, cwd: string): Promise<void> {
  * residual-risk note at the top of this file re: `cwd` not being a hard
  * filesystem jail.
  */
-async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promise<void> {
-  const emergentServer = createSdkMcpServer({
-    name: "emergent",
-    version: "1.0.0",
-    tools: [buildAskUserTool(jobId)],
-  });
-
-  const q = query({
+async function runBuildQuery(
+  jobId: string,
+  cwd: string,
+  prompt: string,
+  builderModel: string
+): Promise<void> {
+  const result = await runAgentQuery({
+    modelId: builderModel,
+    system: dbAware(BUILD_SYSTEM_PROMPT, BUILD_DB_NOTE),
     prompt,
-    options: {
-      model: BUILDER_MODEL,
-      cwd,
-      env: getAgentEnv(),
-      systemPrompt: dbAware(BUILD_SYSTEM_PROMPT, BUILD_DB_NOTE),
-      maxTurns: BUILD_MAX_ITERATIONS,
-      tools: BUILD_TOOLS,
-      mcpServers: { emergent: emergentServer },
-      allowedTools: [...BUILD_TOOLS, "mcp__emergent__ask_user"],
-      strictMcpConfig: true,
-      settingSources: [],
-      // Fully autonomous: there is no interactive TTY/canUseTool callback in
-      // this server process to answer a permission prompt, and this phase
-      // genuinely needs Bash/Write/Edit to run unattended against the
-      // sandbox directory. Single-user local dev tool, not multi-tenant
-      // production — see the residual-risk note at the top of this file.
-      //
-      // The SDK requires allowDangerouslySkipPermissions: true alongside
-      // permissionMode: "bypassPermissions" (checked against
-      // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs — without it the
-      // underlying CLI does not actually enter bypass mode). The real safety
-      // boundary either way is the explicit `tools`/`allowedTools` allowlist
-      // above, not this flag — it only controls whether individual calls to
-      // those six already-allowed tools additionally need interactive
-      // confirmation, which nothing here can answer.
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
+    tools: { ...buildFileTools(cwd), ask_user: askUserToolFor(jobId) },
+    maxSteps: BUILD_MAX_ITERATIONS,
+    onText: async (text, stepId) => {
+      await appendEvent(jobId, "assistant", "assistant_message", { text, stepId });
     },
+    onToolCall: async (call) => {
+      // ask_user appends its own tool_call/question events (agent-tools.ts).
+      if (call.name === "ask_user") return;
+      await appendEvent(jobId, "assistant", "tool_call", {
+        id: call.id,
+        name: call.name,
+        input: call.input,
+      });
+    },
+    shouldAbort: () => isStopped(jobId),
   });
 
-  let sessionId: string | undefined;
-
-  for await (const message of q) {
-    if (await isStopped(jobId)) {
-      q.close();
-      return;
-    }
-
-    if (message.type === "assistant") {
-      let blockIndex = 0;
-      for (const block of message.message.content) {
-        if (block.type === "text" && block.text.trim()) {
-          await appendEvent(jobId, "assistant", "assistant_message", {
-            text: block.text,
-            stepId: message.uuid,
-            blockIndex: blockIndex++,
-          });
-        } else if (block.type === "tool_use") {
-          if (block.name === "mcp__emergent__ask_user") {
-            // tool_call/question events for ask_user are appended by the
-            // tool handler itself (buildAskUserTool).
-          } else {
-            await appendEvent(jobId, "assistant", "tool_call", {
-              id: block.id,
-              name: block.name,
-              input: block.input,
-            });
-          }
-          blockIndex++;
-        }
-      }
-      continue;
-    }
-
-    if (message.type === "result") {
-      sessionId = message.session_id;
-      await recordUsage(
-        jobId,
-        "build_query",
-        BUILDER_MODEL,
-        message.usage.input_tokens,
-        message.usage.output_tokens
-      );
-
-      if (message.subtype !== "success") {
-        throw new Error(describeResultError(message, BUILD_MAX_ITERATIONS));
-      }
-    }
-  }
-
-  if (sessionId) await setAgentSessionId(jobId, sessionId);
+  await recordUsage(
+    jobId,
+    "build_query",
+    builderModel,
+    result.usage.inputTokens,
+    result.usage.outputTokens,
+    result.usage.cachedInputTokens
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -913,200 +729,98 @@ async function runBuildQuery(jobId: string, cwd: string, prompt: string): Promis
 // edit).
 // ---------------------------------------------------------------------------
 
-interface ReviewResult {
-  issuesFound: boolean;
-  summary: string;
-  findings: string[];
-}
-
-/**
- * Forces the review query to report structured findings instead of the
- * harness having to parse free text — same "custom SDK MCP tool the model
- * must call" pattern as buildAskUserTool, just reporting instead of asking.
- */
-function buildReportReviewTool(resultRef: { value: ReviewResult | null }) {
-  return tool(
-    "report_review",
-    "Report your code review findings. Call this exactly once, after inspecting the code, whether or not you found anything wrong.",
-    {
-      issuesFound: z
-        .boolean()
-        .describe("true if you found any real bugs, broken functionality, or issues worth fixing"),
-      summary: z.string().min(1).describe("1-3 sentence summary of the review, for the user"),
-      findings: z
-        .array(z.string().min(1))
-        .max(10)
-        .default([])
-        .describe("Specific issues found, each as its own concise item — empty if issuesFound is false"),
-    },
-    async (args) => {
-      resultRef.value = {
-        issuesFound: args.issuesFound,
-        summary: args.summary,
-        findings: args.findings,
-      };
-      return {
-        content: [{ type: "text" as const, text: "Review recorded." }],
-      };
-    }
-  );
-}
-
-async function runReviewPhase(jobId: string, cwd: string): Promise<ReviewResult> {
+async function runReviewPhase(
+  jobId: string,
+  cwd: string,
+  builderModel: string
+): Promise<ReviewResult> {
   const resultRef: { value: ReviewResult | null } = { value: null };
-  const emergentServer = createSdkMcpServer({
-    name: "emergent",
-    version: "1.0.0",
-    tools: [buildReportReviewTool(resultRef)],
-  });
+  // Read-only toolset by construction: no write/edit in the review belt.
+  const { bash, read, glob, grep } = buildFileTools(cwd);
 
-  const q = query({
+  const result = await runAgentQuery({
+    modelId: builderModel,
+    system: dbAware(REVIEW_SYSTEM_PROMPT, REVIEW_DB_NOTE),
     prompt:
       "Review the app that was just built or edited in this working directory. Report your findings via report_review.",
-    options: {
-      model: BUILDER_MODEL,
-      cwd,
-      env: getAgentEnv(),
-      systemPrompt: dbAware(REVIEW_SYSTEM_PROMPT, REVIEW_DB_NOTE),
-      maxTurns: REVIEW_MAX_ITERATIONS,
-      tools: REVIEW_TOOLS,
-      mcpServers: { emergent: emergentServer },
-      allowedTools: [...REVIEW_TOOLS, "mcp__emergent__report_review"],
-      strictMcpConfig: true,
-      settingSources: [],
-      // Same rationale as runBuildQuery — fully autonomous, no interactive
-      // permission prompt available. Review is read-only by tool allowlist
-      // (REVIEW_TOOLS has no Write/Edit), so this doesn't grant it any
-      // write access.
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
+    tools: { bash, read, glob, grep, report_review: buildReportReviewTool(resultRef) },
+    maxSteps: REVIEW_MAX_ITERATIONS,
+    // The loop ends the moment the verdict lands — no burning further steps.
+    stopOnToolCall: "report_review",
+    onToolCall: async (call) => {
+      if (call.name === "report_review") return;
+      await appendEvent(jobId, "assistant", "tool_call", {
+        id: call.id,
+        name: call.name,
+        input: call.input,
+      });
     },
+    shouldAbort: () => isStopped(jobId),
   });
 
-  let sessionId: string | undefined;
-
-  for await (const message of q) {
-    if (await isStopped(jobId)) {
-      q.close();
-      break;
-    }
-
-    if (message.type === "assistant") {
-      for (const block of message.message.content) {
-        if (block.type === "tool_use" && block.name !== "mcp__emergent__report_review") {
-          await appendEvent(jobId, "assistant", "tool_call", {
-            id: block.id,
-            name: block.name,
-            input: block.input,
-          });
-        }
-      }
-      continue;
-    }
-
-    if (message.type === "result") {
-      sessionId = message.session_id;
-      await recordUsage(
-        jobId,
-        "review_query",
-        BUILDER_MODEL,
-        message.usage.input_tokens,
-        message.usage.output_tokens
-      );
-      if (message.subtype !== "success") {
-        throw new Error(describeResultError(message, REVIEW_MAX_ITERATIONS));
-      }
-    }
-  }
-
-  if (sessionId) await setAgentSessionId(jobId, sessionId);
+  await recordUsage(
+    jobId,
+    "review_query",
+    builderModel,
+    result.usage.inputTokens,
+    result.usage.outputTokens,
+    result.usage.cachedInputTokens
+  );
 
   // The model is instructed to always call report_review, but if it somehow
-  // finished without doing so (e.g. hit the turn cap first), treat that as
+  // finished without doing so (e.g. hit the step cap first), treat that as
   // "nothing conclusively found" rather than crashing the whole job over a
   // review pass — the build itself already succeeded.
-  const result = resultRef.value ?? {
+  const review = resultRef.value ?? {
     issuesFound: false,
     summary: "Review completed without a structured report.",
     findings: [],
   };
 
-  await appendEvent(jobId, "assistant", "review", { ...result });
-  await appendEvent(jobId, "assistant", "assistant_message", { text: result.summary });
+  await appendEvent(jobId, "assistant", "review", { ...review });
+  await appendEvent(jobId, "assistant", "assistant_message", { text: review.summary });
 
-  return result;
+  return review;
 }
 
-async function runDebugPhase(jobId: string, cwd: string, review: ReviewResult): Promise<void> {
+async function runDebugPhase(
+  jobId: string,
+  cwd: string,
+  review: ReviewResult,
+  builderModel: string
+): Promise<void> {
   const findingsList =
     review.findings.length > 0
       ? review.findings.map((finding, i) => `${i + 1}. ${finding}`).join("\n")
       : review.summary;
 
-  const q = query({
+  const result = await runAgentQuery({
+    modelId: builderModel,
+    system: dbAware(DEBUG_SYSTEM_PROMPT, BUILD_DB_NOTE),
     prompt: `Fix the following issues found in code review:\n\n${findingsList}`,
-    options: {
-      model: BUILDER_MODEL,
-      cwd,
-      env: getAgentEnv(),
-      systemPrompt: dbAware(DEBUG_SYSTEM_PROMPT, BUILD_DB_NOTE),
-      maxTurns: DEBUG_MAX_ITERATIONS,
-      tools: BUILD_TOOLS,
-      mcpServers: {},
-      allowedTools: BUILD_TOOLS,
-      strictMcpConfig: true,
-      settingSources: [],
-      // Same rationale as runBuildQuery.
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
+    tools: buildFileTools(cwd),
+    maxSteps: DEBUG_MAX_ITERATIONS,
+    onText: async (text, stepId) => {
+      await appendEvent(jobId, "assistant", "assistant_message", { text, stepId });
     },
+    onToolCall: async (call) => {
+      await appendEvent(jobId, "assistant", "tool_call", {
+        id: call.id,
+        name: call.name,
+        input: call.input,
+      });
+    },
+    shouldAbort: () => isStopped(jobId),
   });
 
-  let sessionId: string | undefined;
-
-  for await (const message of q) {
-    if (await isStopped(jobId)) {
-      q.close();
-      return;
-    }
-
-    if (message.type === "assistant") {
-      let blockIndex = 0;
-      for (const block of message.message.content) {
-        if (block.type === "text" && block.text.trim()) {
-          await appendEvent(jobId, "assistant", "assistant_message", {
-            text: block.text,
-            stepId: message.uuid,
-            blockIndex: blockIndex++,
-          });
-        } else if (block.type === "tool_use") {
-          await appendEvent(jobId, "assistant", "tool_call", {
-            id: block.id,
-            name: block.name,
-            input: block.input,
-          });
-          blockIndex++;
-        }
-      }
-      continue;
-    }
-
-    if (message.type === "result") {
-      sessionId = message.session_id;
-      await recordUsage(
-        jobId,
-        "debug_query",
-        BUILDER_MODEL,
-        message.usage.input_tokens,
-        message.usage.output_tokens
-      );
-      if (message.subtype !== "success") {
-        throw new Error(describeResultError(message, DEBUG_MAX_ITERATIONS));
-      }
-    }
-  }
-
-  if (sessionId) await setAgentSessionId(jobId, sessionId);
+  await recordUsage(
+    jobId,
+    "debug_query",
+    builderModel,
+    result.usage.inputTokens,
+    result.usage.outputTokens,
+    result.usage.cachedInputTokens
+  );
 }
 
 /**
@@ -1161,14 +875,15 @@ async function syncChangedFilesToSandbox(
 async function runReviewAndDebugTail(
   jobId: string,
   sessionId: string,
-  cwd: string
+  cwd: string,
+  builderModel: string
 ): Promise<void> {
-  const review = await runReviewPhase(jobId, cwd);
+  const review = await runReviewPhase(jobId, cwd, builderModel);
   if (await isStopped(jobId)) return;
 
   if (!review.issuesFound) return;
 
-  await runDebugPhase(jobId, cwd, review);
+  await runDebugPhase(jobId, cwd, review, builderModel);
   if (await isStopped(jobId)) return;
 
   const changed = await snapshotSessionFiles(sessionId, cwd);
@@ -1189,7 +904,8 @@ async function runBuildPhase(
   jobId: string,
   sessionId: string,
   originalPrompt: string,
-  planText: string
+  planText: string,
+  builderModel: string
 ): Promise<void> {
   if (await isStopped(jobId)) return;
 
@@ -1246,7 +962,7 @@ Plan:
 ${planText || "(no additional plan text was captured — use the original request directly)"}`;
 
   try {
-    await runBuildQuery(jobId, sandboxDir, buildPrompt);
+    await runBuildQuery(jobId, sandboxDir, buildPrompt, builderModel);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await appendEvent(jobId, "system", "error", { message: `Build failed: ${message}` });
@@ -1278,7 +994,7 @@ ${planText || "(no additional plan text was captured — use the original reques
   // running) rather than failing the whole job and tearing down a working
   // live preview over a review pass that merely couldn't complete.
   try {
-    await runReviewAndDebugTail(jobId, sessionId, sandboxDir);
+    await runReviewAndDebugTail(jobId, sessionId, sandboxDir, builderModel);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await appendEvent(jobId, "system", "error", {
@@ -1320,8 +1036,12 @@ First inspect the existing files (list the directory, then read whatever's relev
 
 Only stop to ask a clarifying question if the request is genuinely ambiguous in a way that risks doing the wrong thing. For a straightforward iterative request, make a reasonable choice consistent with the existing app and note what you chose in your closing summary — don't block on a multiple-choice questionnaire for a small change.`;
 
-/** A brand-new project's first job: always plans (Opus), always requires ask_user on the first pass. */
-async function runInitialBuildFlow(jobId: string, prompt: string): Promise<void> {
+/** A brand-new project's first job: always plans (planner model), always requires ask_user on the first pass. */
+async function runInitialBuildFlow(
+  jobId: string,
+  prompt: string,
+  builderModel: string
+): Promise<void> {
   const cwd = ensureJobScratchDir(jobId);
   const planText = await runPlanningPhase(jobId, cwd, SYSTEM_PROMPT, prompt, true);
   if (planText === null) return;
@@ -1333,7 +1053,7 @@ async function runInitialBuildFlow(jobId: string, prompt: string): Promise<void>
   const job = await getJob(jobId);
   if (!job) return;
 
-  await runBuildPhase(jobId, job.sessionId, prompt, planText);
+  await runBuildPhase(jobId, job.sessionId, prompt, planText, builderModel);
 }
 
 /**
@@ -1346,13 +1066,14 @@ async function runContinuationFlow(
   jobId: string,
   sessionId: string,
   prompt: string,
-  planMode: boolean
+  planMode: boolean,
+  builderModel: string
 ): Promise<void> {
   if (!planMode) {
     await appendEvent(jobId, "assistant", "assistant_message", {
       text: "Got it — let me take a look at the app and make that change.",
     });
-    await runBuildPhase(jobId, sessionId, prompt, CONTINUATION_PLAN_TEXT);
+    await runBuildPhase(jobId, sessionId, prompt, CONTINUATION_PLAN_TEXT, builderModel);
     return;
   }
 
@@ -1367,7 +1088,7 @@ async function runContinuationFlow(
   if (planText === null) return;
   if (await isStopped(jobId)) return;
 
-  await runBuildPhase(jobId, sessionId, prompt, planText);
+  await runBuildPhase(jobId, sessionId, prompt, planText, builderModel);
 }
 
 async function runRealLoop(jobId: string): Promise<void> {
@@ -1393,13 +1114,17 @@ async function runRealLoop(jobId: string): Promise<void> {
 
     const userMessageEvent = allEvents.find((e) => e.type === "user_message");
     const userMessagePayload = userMessageEvent?.payload as
-      | { text?: string; planMode?: boolean }
+      | { text?: string; planMode?: boolean; model?: string }
       | undefined;
     const prompt = userMessagePayload?.text;
     if (!prompt) {
       throw new Error("Job has no initial user message to build a prompt from.");
     }
     const planMode = userMessagePayload?.planMode === true;
+    // The composer's per-message model choice — validated against the
+    // catalog + configured providers; anything invalid/unavailable silently
+    // becomes the default builder (see resolveBuilderModel in llm.ts).
+    const builderModel = resolveBuilderModel(userMessagePayload?.model);
 
     const job = await getJob(jobId);
     if (!job) return;
@@ -1412,11 +1137,11 @@ async function runRealLoop(jobId: string): Promise<void> {
     // createProjectAndJob/continueSessionWithPrompt for this to be correct.
     const existingFiles = await getSessionFiles(job.sessionId);
     if (existingFiles.length > 0) {
-      await runContinuationFlow(jobId, job.sessionId, prompt, planMode);
+      await runContinuationFlow(jobId, job.sessionId, prompt, planMode, builderModel);
       return;
     }
 
-    await runInitialBuildFlow(jobId, prompt);
+    await runInitialBuildFlow(jobId, prompt, builderModel);
   } catch (err) {
     await handleAgentError(jobId, err);
   }
