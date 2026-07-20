@@ -9,6 +9,7 @@ import {
   type ToolSet,
 } from "ai";
 import { MODEL_CATALOG, getModelInfo, type ModelInfo } from "@/lib/models";
+import type { UserApiKeys } from "@/server/user-keys";
 
 // ---------------------------------------------------------------------------
 // Provider-agnostic LLM runtime (Vercel AI SDK) — replaces the Claude Agent
@@ -21,6 +22,14 @@ import { MODEL_CATALOG, getModelInfo, type ModelInfo } from "@/lib/models";
 // the local `claude login` subscription; this runtime uses the metered API
 // via ANTHROPIC_API_KEY. No key -> Claude models hidden, planner falls back
 // to the strongest OpenAI model (resolvePlannerModel).
+//
+// BYOK (see src/server/user-keys.ts): every resolver below optionally takes
+// `keys`, a job's user-supplied provider key(s). A user key WIDENS
+// availability (a provider with no platform env key still counts as
+// available once a user key exists for it) and, in resolveModel, TAKES
+// PRECEDENCE over the platform's env key when both exist — that precedence
+// is what makes "the user's build bills their key" true rather than a
+// fallback that only ever matters when the platform has nothing configured.
 // ---------------------------------------------------------------------------
 
 export function isAnthropicConfigured(): boolean {
@@ -32,55 +41,78 @@ export function isOpenAIConfigured(): boolean {
   return Boolean(process.env.OPENAI_API_KEY || process.env.OPEN_AI_KEY);
 }
 
-function providerConfigured(provider: ModelInfo["provider"]): boolean {
-  return provider === "anthropic" ? isAnthropicConfigured() : isOpenAIConfigured();
+/** A provider is available when the platform's own env key is configured OR the caller supplied a BYOK user key for it (see the BYOK note above). */
+function providerAvailable(provider: ModelInfo["provider"], keys?: UserApiKeys): boolean {
+  return provider === "anthropic"
+    ? isAnthropicConfigured() || Boolean(keys?.anthropic)
+    : isOpenAIConfigured() || Boolean(keys?.openai);
 }
 
-/** Catalog filtered to providers whose API key is configured — feeds GET /api/models and all server-side validation/defaults. */
+/** Catalog filtered to providers whose API key is configured — feeds all server-side validation/defaults. Platform-env only, no BYOK widening: GET /api/models needs the full catalog plus a per-model flag instead (see src/app/api/models/route.ts), since BYOK availability is decided client-side. */
 export function getAvailableModels(): ModelInfo[] {
-  return MODEL_CATALOG.filter((m) => providerConfigured(m.provider));
+  return MODEL_CATALOG.filter((m) => providerAvailable(m.provider));
 }
 
-/** First available builder-tier model in catalog order (Sonnet first when Anthropic is configured, else the GPT-5.6 tiers). */
-export function defaultBuilderModel(): string {
-  const m = getAvailableModels().find((m) => m.tier === "builder");
-  if (!m) throw new Error("No LLM provider is configured — set OPENAI_API_KEY and/or ANTHROPIC_API_KEY.");
+/** First available builder-tier model in catalog order (Sonnet first when Anthropic is configured, else the GPT-5.6 tiers) — widened by `keys` exactly like resolveBuilderModel. */
+export function defaultBuilderModel(keys?: UserApiKeys): string {
+  const m = MODEL_CATALOG.find((m) => m.tier === "builder" && providerAvailable(m.provider, keys));
+  if (!m) {
+    throw new Error(
+      "No LLM provider is configured — set OPENAI_API_KEY and/or ANTHROPIC_API_KEY, or supply a personal API key."
+    );
+  }
   return m.id;
 }
 
-/** Planner is never user-selected: Opus when Anthropic is configured, else the flagship OpenAI model. */
-export function resolvePlannerModel(): string {
-  if (isAnthropicConfigured()) return "claude-opus-4-8";
-  if (isOpenAIConfigured()) return "gpt-5.6-sol";
-  throw new Error("No LLM provider is configured — set OPENAI_API_KEY and/or ANTHROPIC_API_KEY.");
+/** Planner is never user-selected: Opus when Anthropic is configured, else the flagship OpenAI model. A BYOK key widens this the same way as the builder path — a user with only an OpenAI key still gets a real planner model on an Anthropic-only platform. */
+export function resolvePlannerModel(keys?: UserApiKeys): string {
+  if (providerAvailable("anthropic", keys)) return "claude-opus-4-8";
+  if (providerAvailable("openai", keys)) return "gpt-5.6-sol";
+  throw new Error(
+    "No LLM provider is configured — set OPENAI_API_KEY and/or ANTHROPIC_API_KEY, or supply a personal API key."
+  );
 }
 
 /**
  * Validates a client-supplied model id: must exist in the catalog, be
- * builder-tier, and its provider configured — anything else falls back to
- * the default. Never throws on bad input (client data).
+ * builder-tier, and its provider available (platform-configured or
+ * BYOK-keyed) — anything else falls back to the default. Never throws on bad
+ * input (client data).
  */
-export function resolveBuilderModel(requested: unknown): string {
+export function resolveBuilderModel(requested: unknown, keys?: UserApiKeys): string {
   if (typeof requested === "string") {
     const info = getModelInfo(requested);
-    if (info && info.tier === "builder" && providerConfigured(info.provider)) return info.id;
+    if (info && info.tier === "builder" && providerAvailable(info.provider, keys)) return info.id;
   }
-  return defaultBuilderModel();
+  return defaultBuilderModel(keys);
 }
 
 let anthropicProvider: ReturnType<typeof createAnthropic> | null = null;
 let openaiProvider: ReturnType<typeof createOpenAI> | null = null;
 
-function resolveModel(modelId: string): LanguageModel {
+/**
+ * Resolves a model id to an AI SDK LanguageModel. A BYOK user key (see the
+ * BYOK note above) gets a fresh, uncached provider instance per call — a
+ * config object with just an `apiKey` string is cheap to construct, and NOT
+ * caching it in the module singletons below matters: those singletons are
+ * shared across every job in this process, so caching a user's key on them
+ * would leak it into other jobs' calls. The env-keyed path is unchanged —
+ * still the `??=` singleton.
+ */
+function resolveModel(modelId: string, keys?: UserApiKeys): LanguageModel {
   const info = getModelInfo(modelId);
   if (!info) throw new Error(`Unknown model id: ${modelId}`);
-  if (!providerConfigured(info.provider)) {
+  if (!providerAvailable(info.provider, keys)) {
     throw new Error(`Model ${modelId} requires the ${info.provider} API key, which is not configured.`);
   }
+
   if (info.provider === "anthropic") {
+    if (keys?.anthropic) return createAnthropic({ apiKey: keys.anthropic })(modelId);
     anthropicProvider ??= createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     return anthropicProvider(modelId);
   }
+
+  if (keys?.openai) return createOpenAI({ apiKey: keys.openai })(modelId);
   openaiProvider ??= createOpenAI({
     apiKey: process.env.OPENAI_API_KEY || process.env.OPEN_AI_KEY,
   });
@@ -105,6 +137,8 @@ export interface RunAgentQueryOptions {
   prompt: string;
   tools?: ToolSet;
   maxSteps: number;
+  /** BYOK: this job's user-supplied provider key(s), if any (see src/server/user-keys.ts) — threaded to resolveModel, where a user key takes precedence over the platform's env key. */
+  apiKeys?: UserApiKeys;
   /** Extra stop conditions beyond the step cap (e.g. hasToolCall("report_review")). */
   stopOnToolCall?: string;
   /** Called with each assistant text chunk, in order. */
@@ -159,7 +193,7 @@ export async function runAgentQuery(options: RunAgentQueryOptions): Promise<RunA
 
   try {
     const result = await generateText({
-      model: resolveModel(options.modelId),
+      model: resolveModel(options.modelId, options.apiKeys),
       ...promptShape,
       tools: options.tools,
       stopWhen,
