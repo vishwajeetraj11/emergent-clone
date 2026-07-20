@@ -21,6 +21,8 @@ import { getSessionFiles, snapshotSessionFiles } from "@/server/files";
 import { debitForJobUsage } from "@/server/credits";
 import { getProjectAgentContext } from "@/server/projects";
 import { isNeonConfigured, writeSandboxEnvFile } from "@/server/project-db";
+import { getJobApiKeys, clearJobApiKeys } from "@/server/user-keys";
+import { getModelInfo } from "@/lib/models";
 import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -259,6 +261,17 @@ function isMockMode(): boolean {
  * different, differently-priced models) rather than assuming one flat rate.
  * `cachedInputTokens` (a subset of inputTokens served from prompt cache) is
  * billed at the model's much cheaper cache-read rate.
+ *
+ * BYOK (see src/server/user-keys.ts): when THIS call's model provider was
+ * satisfied by the job's own user-supplied key rather than the platform's,
+ * the usage event is tagged `billing: "byok"` (a marker string only — never
+ * key material) and debitForJobUsage is skipped entirely — the user already
+ * paid via their own key, so platform credits must not double-charge. The
+ * provider is derived from THIS call's model id, not the job's overall
+ * builder model: the planner and builder can be keyed differently (e.g. an
+ * Anthropic-only platform with a user-supplied OpenAI key still runs the
+ * planner on the platform's Claude key while the builder runs on the user's
+ * GPT key), so billing is decided per call, not per job.
  */
 async function recordUsage(
   jobId: string,
@@ -268,13 +281,19 @@ async function recordUsage(
   outputTokens: number,
   cachedInputTokens = 0
 ): Promise<void> {
+  const provider = getModelInfo(model)?.provider;
+  const isByok = provider ? Boolean(getJobApiKeys(jobId)?.[provider]) : false;
+
   await appendEvent(jobId, "system", "usage", {
     model,
     inputTokens,
     outputTokens,
     cachedInputTokens,
     step,
+    ...(isByok ? { billing: "byok" } : {}),
   });
+
+  if (isByok) return;
   await debitForJobUsage(jobId, step, model, inputTokens, outputTokens, cachedInputTokens);
 }
 
@@ -294,6 +313,11 @@ export async function runAgentLoop(jobId: string): Promise<void> {
     }
   } finally {
     runningJobs.delete(jobId);
+    // BYOK: wipe this job's stored user key(s), if any, the moment its run
+    // ends — success, failure, or stop — so nothing outlives the job that
+    // needed it (see src/server/user-keys.ts). A no-op when this job never
+    // had any keys stashed (setJobApiKeys was never called for it).
+    clearJobApiKeys(jobId);
   }
 }
 
@@ -498,7 +522,8 @@ async function runPlanQuery(
   systemPrompt: string,
   userPrompt: string
 ): Promise<PlanQueryResult> {
-  const plannerModel = resolvePlannerModel();
+  const apiKeys = getJobApiKeys(jobId);
+  const plannerModel = resolvePlannerModel(apiKeys);
   let askUserCalled = false;
   const planTextParts: string[] = [];
 
@@ -509,6 +534,7 @@ async function runPlanQuery(
       prompt: userPrompt,
       tools: { ask_user: askUserToolFor(jobId) },
       maxSteps: MAX_ITERATIONS,
+      apiKeys,
       onText: async (text, stepId) => {
         planTextParts.push(text);
         await appendEvent(jobId, "assistant", "assistant_message", { text, stepId });
@@ -647,13 +673,15 @@ Write a revised plan.`;
  * set job status; the build phase that follows owns the terminal status.
  */
 async function runSummaryQuery(jobId: string, _cwd: string): Promise<void> {
-  const plannerModel = resolvePlannerModel();
+  const apiKeys = getJobApiKeys(jobId);
+  const plannerModel = resolvePlannerModel(apiKeys);
   const result = await runAgentQuery({
     modelId: plannerModel,
     system: SYSTEM_PROMPT,
     prompt:
       "The plan has been approved. Write a brief (2-3 sentence) closing summary for the user of what you'll build next. Plain text only — no code, no tool calls.",
     maxSteps: 1,
+    apiKeys,
     shouldAbort: () => isStopped(jobId),
   });
 
@@ -697,6 +725,7 @@ async function runBuildQuery(
     prompt,
     tools: { ...buildFileTools(cwd), ask_user: askUserToolFor(jobId) },
     maxSteps: BUILD_MAX_ITERATIONS,
+    apiKeys: getJobApiKeys(jobId),
     onText: async (text, stepId) => {
       await appendEvent(jobId, "assistant", "assistant_message", { text, stepId });
     },
@@ -745,6 +774,7 @@ async function runReviewPhase(
       "Review the app that was just built or edited in this working directory. Report your findings via report_review.",
     tools: { bash, read, glob, grep, report_review: buildReportReviewTool(resultRef) },
     maxSteps: REVIEW_MAX_ITERATIONS,
+    apiKeys: getJobApiKeys(jobId),
     // The loop ends the moment the verdict lands — no burning further steps.
     stopOnToolCall: "report_review",
     onToolCall: async (call) => {
@@ -800,6 +830,7 @@ async function runDebugPhase(
     prompt: `Fix the following issues found in code review:\n\n${findingsList}`,
     tools: buildFileTools(cwd),
     maxSteps: DEBUG_MAX_ITERATIONS,
+    apiKeys: getJobApiKeys(jobId),
     onText: async (text, stepId) => {
       await appendEvent(jobId, "assistant", "assistant_message", { text, stepId });
     },
@@ -1122,9 +1153,12 @@ async function runRealLoop(jobId: string): Promise<void> {
     }
     const planMode = userMessagePayload?.planMode === true;
     // The composer's per-message model choice — validated against the
-    // catalog + configured providers; anything invalid/unavailable silently
-    // becomes the default builder (see resolveBuilderModel in llm.ts).
-    const builderModel = resolveBuilderModel(userMessagePayload?.model);
+    // catalog + configured/BYOK-keyed providers; anything invalid/unavailable
+    // silently becomes the default builder (see resolveBuilderModel in
+    // llm.ts). getJobApiKeys(jobId) is this job's stashed BYOK key(s), if
+    // any (see src/server/user-keys.ts / src/server/jobs.ts /
+    // src/server/sessions.ts for where they're set before this loop starts).
+    const builderModel = resolveBuilderModel(userMessagePayload?.model, getJobApiKeys(jobId));
 
     const job = await getJob(jobId);
     if (!job) return;

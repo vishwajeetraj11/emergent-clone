@@ -6,6 +6,7 @@ import { getSessionFiles } from "@/server/files";
 import { runAgentLoop } from "@/server/agent";
 import { ensureSessionDatabase } from "@/server/project-db";
 import { getSandboxDir, writeSnapshotFiles } from "@/server/sandbox";
+import { setJobApiKeys, type UserApiKeys } from "@/server/user-keys";
 import type { JobRow, SessionRow } from "@/server/jobs";
 
 // ---------------------------------------------------------------------------
@@ -41,7 +42,8 @@ export async function continueSessionWithPrompt(
   sessionId: string,
   prompt: string,
   planMode = false,
-  model?: string
+  model?: string,
+  apiKeys?: UserApiKeys
 ): Promise<{ session: SessionRow; job: JobRow }> {
   const db = getDb();
   const trimmed = prompt.trim();
@@ -60,6 +62,11 @@ export async function continueSessionWithPrompt(
     planMode,
     ...(model ? { model } : {}),
   });
+
+  // BYOK: same stash-before-fire pattern as createProjectAndJob
+  // (src/server/jobs.ts) — never on the event payload above. See
+  // src/server/user-keys.ts for the store's security contract.
+  if (apiKeys) setJobApiKeys(job.id, apiKeys);
 
   // Fire-and-forget, same pattern/limitation as createProjectAndJob.
   runAgentLoop(job.id).catch((err) => {

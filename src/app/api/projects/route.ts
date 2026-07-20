@@ -3,6 +3,7 @@ import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
 import { DEV_USER } from "@/lib/dev-user";
 import { createProjectAndJob } from "@/server/jobs";
 import { listProjectsForUser } from "@/server/projects";
+import { parseUserApiKeys } from "@/server/user-keys";
 
 /**
  * The dashboard's project list. Unconfigured (default): DEV_USER's projects.
@@ -34,7 +35,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  let body: { prompt?: unknown; model?: unknown };
+  let body: { prompt?: unknown; model?: unknown; apiKeys?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -48,9 +49,12 @@ export async function POST(request: Request) {
   // Validated later against the model catalog (resolveBuilderModel) — an
   // unknown/unavailable id just falls back to the default, never errors.
   const model = typeof body.model === "string" ? body.model : undefined;
+  // BYOK (see src/server/user-keys.ts): malformed input is dropped silently,
+  // never surfaced as an error — never logged or echoed back either way.
+  const apiKeys = parseUserApiKeys(body.apiKeys);
 
   try {
-    const { project, session, job } = await createProjectAndJob(prompt, model);
+    const { project, session, job } = await createProjectAndJob(prompt, model, apiKeys);
     return NextResponse.json({
       project: {
         id: project.id,

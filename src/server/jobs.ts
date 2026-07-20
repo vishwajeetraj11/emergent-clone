@@ -9,6 +9,7 @@ import { ensureSignupBonus } from "@/server/credits";
 import { isUniqueViolation } from "@/server/db-utils";
 import { makeProjectSlug } from "@/server/slug";
 import { runAgentLoop } from "@/server/agent";
+import { setJobApiKeys, type UserApiKeys } from "@/server/user-keys";
 
 export type ProjectRow = typeof projects.$inferSelect;
 export type SessionRow = typeof sessions.$inferSelect;
@@ -42,7 +43,7 @@ async function ensureDevUser() {
  * acceptable for Phase 1; a durable queue/worker is out of scope until a
  * later phase.
  */
-export async function createProjectAndJob(prompt: string, model?: string) {
+export async function createProjectAndJob(prompt: string, model?: string, apiKeys?: UserApiKeys) {
   const db = getDb();
 
   // Phase 3: isClerkConfigured() gates which user this project is owned by.
@@ -103,6 +104,14 @@ export async function createProjectAndJob(prompt: string, model?: string) {
     text: trimmed,
     ...(model ? { model } : {}),
   });
+
+  // BYOK: stash the user's own provider key(s) (see src/server/user-keys.ts)
+  // in the process-local store keyed by this job's id — deliberately NOT on
+  // the event payload above, which is persisted to the DB and streamed to
+  // the client. Must happen AFTER the job row exists (needs job.id) and
+  // BEFORE runAgentLoop fires below, since the loop reads this store back
+  // while resolving models for this job.
+  if (apiKeys) setJobApiKeys(job.id, apiKeys);
 
   // Fire-and-forget: intentionally not awaited. See the Phase 1 limitation
   // note above.

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { assertSessionOwnership } from "@/lib/authz";
 import { continueSessionWithPrompt } from "@/server/sessions";
+import { parseUserApiKeys } from "@/server/user-keys";
 
 /**
  * Session-scoped "send a new top-level message" — distinct from
@@ -21,7 +22,7 @@ export async function POST(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  let body: { prompt?: unknown; planMode?: unknown; model?: unknown };
+  let body: { prompt?: unknown; planMode?: unknown; model?: unknown; apiKeys?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -36,9 +37,12 @@ export async function POST(
   // Validated later against the model catalog (resolveBuilderModel) — an
   // unknown/unavailable id just falls back to the default, never errors.
   const model = typeof body.model === "string" ? body.model : undefined;
+  // BYOK (see src/server/user-keys.ts): malformed input is dropped silently,
+  // never surfaced as an error — never logged or echoed back either way.
+  const apiKeys = parseUserApiKeys(body.apiKeys);
 
   try {
-    const { job } = await continueSessionWithPrompt(sessionId, prompt, planMode, model);
+    const { job } = await continueSessionWithPrompt(sessionId, prompt, planMode, model, apiKeys);
     return NextResponse.json({ job: { id: job.id, status: job.status } });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
