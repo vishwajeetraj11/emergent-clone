@@ -1,15 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink, PowerOff, RefreshCw, X } from "lucide-react";
+import { ExternalLink, RefreshCw, X } from "lucide-react";
+import { IconButton } from "@/components/ui/icon-button";
+import { PingDot } from "@/components/ui/ping-dot";
 import { OnboardingCarousel } from "@/components/shell/OnboardingCarousel";
 import { ProjectsList } from "@/components/shell/ProjectsList";
-import {
-  PAUSED_PREVIEW_BODY,
-  PAUSED_PREVIEW_BUTTON,
-  PAUSED_PREVIEW_TITLE,
-  RESTORING_PREVIEW_MESSAGE,
-} from "@/lib/messages";
+import { PausedPreviewCard } from "@/components/shell/preview/PausedPreviewCard";
+import { PreviewFrame } from "@/components/shell/preview/PreviewFrame";
+import { ViewportToggle, type Viewport } from "@/components/shell/preview/ViewportToggle";
+import { RESTORING_PREVIEW_MESSAGE } from "@/lib/messages";
 
 export function PreviewPanel({
   previewUrl,
@@ -47,6 +47,16 @@ export function PreviewPanel({
   // directly (below) is the real way to see what's actually happening.
   const [reloadNonce, setReloadNonce] = useState(0);
 
+  // Lets the generated app be checked at common device widths without
+  // leaving the panel or resizing the browser window — desktop renders the
+  // iframe full-bleed exactly as before; tablet/phone frame it at a fixed
+  // width inside a centered "device" card so responsive bugs are visible
+  // without a real device. Deliberately left out of the frameLoaded reset
+  // effect below: switching frame size shouldn't re-cover an already-loaded
+  // app — and (see the iframe branch) desktop/tablet/phone share one DOM
+  // shape specifically so toggling this never remounts the iframe.
+  const [viewport, setViewport] = useState<Viewport>("desktop");
+
   return (
     <section className="flex h-full flex-1 flex-col bg-background">
       <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border px-4">
@@ -68,33 +78,21 @@ export function PreviewPanel({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {previewUrl && <ViewportToggle viewport={viewport} onChange={setViewport} />}
           {previewUrl && (
-            <button
-              type="button"
-              aria-label="Reload preview"
-              title="Reload preview"
-              onClick={() => setReloadNonce((n) => n + 1)}
-              className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-            >
+            <IconButton label="Reload preview" onClick={() => setReloadNonce((n) => n + 1)}>
               <RefreshCw className="size-3.5" />
-            </button>
+            </IconButton>
           )}
-          <button
-            type="button"
-            aria-label="Close preview"
-            className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          >
+          <IconButton label="Close preview">
             <X className="size-4" />
-          </button>
+          </IconButton>
         </div>
       </header>
 
       {isRestoring ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-          <span className="relative flex size-2">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500/60 opacity-75" />
-            <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
-          </span>
+          <PingDot />
           <p className="text-sm text-muted-foreground">{RESTORING_PREVIEW_MESSAGE}</p>
         </div>
       ) : previewUrl && isPreviewDead ? (
@@ -102,37 +100,9 @@ export function PreviewPanel({
         // sandbox's own death — a background health poll in useAgentSession
         // flips isPreviewDead once a server-side probe confirms the runtime
         // is actually gone (see that hook's poll effect).
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-          <PowerOff className="size-8 text-muted-foreground" />
-          <p className="text-sm font-medium text-foreground">{PAUSED_PREVIEW_TITLE}</p>
-          <p className="max-w-sm text-center text-sm text-muted-foreground">
-            {PAUSED_PREVIEW_BODY}
-          </p>
-          {restoreError && (
-            <p className="max-w-sm text-center text-xs text-red-400">
-              Restart failed: {restoreError}
-            </p>
-          )}
-          <button
-            type="button"
-            onClick={onRestartPreview}
-            className="rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
-          >
-            {PAUSED_PREVIEW_BUTTON}
-          </button>
-        </div>
+        <PausedPreviewCard restoreError={restoreError} onRestartPreview={onRestartPreview} />
       ) : previewUrl ? (
-        // Phase 2: the sandbox is a real local child process running
-        // agent-generated code (see src/server/sandbox.ts) — sandboxed
-        // iframe attributes reflect that it's untrusted-ish generated output,
-        // not a same-origin first-party page.
-        <iframe
-          key={`${previewUrl}-${reloadNonce}`}
-          src={previewUrl}
-          title="App Preview"
-          className="w-full flex-1 border-0 bg-white"
-          sandbox="allow-scripts allow-same-origin allow-forms"
-        />
+        <PreviewFrame previewUrl={previewUrl} reloadNonce={reloadNonce} viewport={viewport} />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
           {restoreError && (
