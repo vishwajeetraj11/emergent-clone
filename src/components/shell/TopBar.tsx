@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { UserButton } from "@clerk/nextjs";
-import { Bell, Home, Plus, Sparkles, X } from "lucide-react";
+import { Bell, Home, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { CreditsPill } from "@/components/shell/topbar/CreditsPill";
+import { ProjectTabs } from "@/components/shell/topbar/ProjectTabs";
 import { DEV_USER } from "@/lib/dev-user";
-import { cn } from "@/lib/utils";
 import type { JobStatus, ProjectSummary } from "@/lib/types";
 
 // Client-safe Clerk check — mirrors src/lib/auth.ts's isClerkConfigured(),
@@ -20,30 +20,6 @@ import type { JobStatus, ProjectSummary } from "@/lib/types";
 // to render <UserButton> without the <ClerkProvider> that ClerkGate only
 // mounts when BOTH keys are present, and crash.
 const CLERK_CONFIGURED_CLIENT = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
-
-type ProjectTab = {
-  id: string;
-  name: string;
-  status: "running" | "idle" | "error";
-};
-
-function jobStatusToDotStatus(status: JobStatus | null | undefined): ProjectTab["status"] {
-  if (status === "running" || status === "waiting_on_user" || status === "waiting_on_plan")
-    return "running";
-  if (status === "failed") return "error";
-  return "idle";
-}
-
-function statusDotClass(status: ProjectTab["status"]) {
-  switch (status) {
-    case "running":
-      return "bg-emerald-500";
-    case "error":
-      return "bg-red-500";
-    default:
-      return "bg-muted-foreground";
-  }
-}
 
 export function TopBar({
   project,
@@ -62,127 +38,6 @@ export function TopBar({
   /** PATCH /api/projects/[id] — see useAgentSession's renameProject. */
   onRenameProject?: (name: string) => Promise<void>;
 }) {
-  // Phase 1 only ever drives a single active project, so the tab list is
-  // derived directly from props on every render rather than mirrored into
-  // state via an effect. Local state only tracks UI-only overrides: a tab
-  // the user dismissed, or manually clicking a (currently single) tab.
-  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState("");
-  const [isSavingRename, setIsSavingRename] = useState(false);
-  const [activeOverride, setActiveOverride] = useState<string | null>(null);
-
-  // Phase 4 (Half A, REAL): the "Buy Credits" button now reflects the
-  // signed-in user's actual credit_ledger balance (GET /api/credits) instead
-  // of being a purely decorative label. Refetched whenever the active job's
-  // status changes, since a running/just-finished job is exactly when new
-  // `usage` events (and their matching ledger debits) land.
-  const [balance, setBalance] = useState<number | null>(null);
-  // Phase 4 (Half B, gated inert): clicking the button attempts a real
-  // Stripe Checkout session (src/server/stripe.ts) when configured, and
-  // surfaces "Stripe is not configured" otherwise — never a silent no-op.
-  const [buyStatus, setBuyStatus] = useState<
-    "idle" | "loading" | "not_configured" | "error"
-  >("idle");
-  const [buyMessage, setBuyMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/credits")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { balance?: number } | null) => {
-        if (!cancelled && data && typeof data.balance === "number") {
-          setBalance(data.balance);
-        }
-      })
-      .catch(() => {
-        // Balance display is best-effort — no DB configured yet, etc.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [jobStatus]);
-
-  async function handleBuyCredits() {
-    setBuyStatus("loading");
-    setBuyMessage(null);
-    try {
-      const res = await fetch("/api/billing/checkout", { method: "POST" });
-      const data = (await res.json().catch(() => ({}))) as {
-        configured?: boolean;
-        url?: string;
-        error?: string;
-      };
-      if (data.configured === false) {
-        setBuyStatus("not_configured");
-        setBuyMessage(
-          data.error ?? "Stripe is not configured in this environment."
-        );
-        return;
-      }
-      if (!res.ok || data.error || !data.url) {
-        setBuyStatus("error");
-        setBuyMessage(data.error ?? `Request failed (${res.status})`);
-        return;
-      }
-      setBuyStatus("idle");
-      window.location.href = data.url;
-    } catch (err) {
-      setBuyStatus("error");
-      setBuyMessage(
-        err instanceof Error ? err.message : "Failed to start checkout"
-      );
-    }
-  }
-
-  const buyTooltipText =
-    buyStatus === "not_configured" || buyStatus === "error"
-      ? (buyMessage ?? "Something went wrong.")
-      : "Your current credit balance — click to buy more.";
-
-  const tabs: ProjectTab[] =
-    project && !dismissedIds.has(project.id)
-      ? [
-          {
-            id: project.id,
-            name: project.name,
-            status: jobStatusToDotStatus(jobStatus),
-          },
-        ]
-      : [];
-  const activeTab = tabs.some((t) => t.id === activeOverride)
-    ? activeOverride
-    : (tabs[0]?.id ?? null);
-
-  function closeTab(id: string) {
-    setDismissedIds((prev) => new Set(prev).add(id));
-    setActiveOverride((prev) => (prev === id ? null : prev));
-  }
-
-  function startRenaming(tab: ProjectTab) {
-    if (!onRenameProject) return;
-    setRenamingId(tab.id);
-    setRenameValue(tab.name);
-  }
-
-  async function commitRename(originalName: string) {
-    const trimmed = renameValue.trim();
-    if (!trimmed || trimmed === originalName) {
-      setRenamingId(null);
-      return;
-    }
-    setIsSavingRename(true);
-    try {
-      await onRenameProject?.(trimmed);
-      setRenamingId(null);
-    } catch {
-      // Leave the input open with the attempted value so the user can
-      // retry or cancel — a silently reverted rename reads as "it worked".
-    } finally {
-      setIsSavingRename(false);
-    }
-  }
-
   // Navigating home/starting a new project is just a route change — the
   // current project is never deleted, always reachable again from "Your
   // projects" on the home screen — but leaving mid-job LOOKS like the chat
@@ -230,101 +85,17 @@ export function TopBar({
         </Button>
       </div>
 
-      {/* Project tabs */}
-      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-        {tabs.map((tab) => {
-          const isActive = tab.id === activeTab;
-          return (
-            <div
-              key={tab.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => {
-                setActiveOverride(tab.id);
-                onSelectProject?.(tab.id);
-              }}
-              className={cn(
-                "group flex shrink-0 items-center gap-2 rounded-t-md border border-b-0 border-border px-3 py-1.5 text-xs transition-colors",
-                isActive
-                  ? "bg-card text-foreground"
-                  : "bg-transparent text-muted-foreground hover:bg-secondary/50"
-              )}
-            >
-              <span
-                className={cn(
-                  "size-1.5 shrink-0 rounded-full",
-                  statusDotClass(tab.status)
-                )}
-                aria-hidden
-              />
-              {renamingId === tab.id ? (
-                <input
-                  autoFocus
-                  value={renameValue}
-                  disabled={isSavingRename}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  onBlur={() => commitRename(tab.name)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      commitRename(tab.name);
-                    } else if (e.key === "Escape") {
-                      e.preventDefault();
-                      setRenamingId(null);
-                    }
-                  }}
-                  className="w-28 rounded-sm bg-transparent px-0.5 text-xs outline-none ring-1 ring-ring/50 disabled:opacity-50"
-                />
-              ) : (
-                <span
-                  className="max-w-40 truncate"
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    startRenaming(tab);
-                  }}
-                  title={onRenameProject ? "Double-click to rename" : undefined}
-                >
-                  {tab.name}
-                </span>
-              )}
-              <button
-                type="button"
-                aria-label={`Close ${tab.name}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeTab(tab.id);
-                }}
-                className="rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
-              >
-                <X className="size-3" />
-              </button>
-            </div>
-          );
-        })}
-        <button
-          type="button"
-          aria-label="New project"
-          onClick={guardedNavigateHome}
-          className="flex shrink-0 items-center justify-center rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-        >
-          <Plus className="size-3.5" />
-        </button>
-      </div>
+      <ProjectTabs
+        project={project}
+        jobStatus={jobStatus}
+        onSelectProject={onSelectProject}
+        onRenameProject={onRenameProject}
+        onNewProject={guardedNavigateHome}
+      />
 
       {/* Right cluster */}
       <div className="flex shrink-0 items-center gap-2">
-        <Tooltip>
-          <TooltipTrigger
-            aria-label="Buy credits"
-            onClick={handleBuyCredits}
-            disabled={buyStatus === "loading"}
-            className="flex h-7 items-center gap-1.5 rounded-[min(var(--radius-md),12px)] bg-yellow-400 px-2.5 text-[0.8rem] font-medium text-yellow-950 transition-colors hover:bg-yellow-300 disabled:pointer-events-none disabled:opacity-50"
-          >
-            {balance !== null ? `${balance.toLocaleString()} credits` : "Buy Credits"}
-          </TooltipTrigger>
-          <TooltipContent>{buyTooltipText}</TooltipContent>
-        </Tooltip>
+        <CreditsPill jobStatus={jobStatus} />
         <Tooltip>
           <TooltipTrigger
             aria-label="Notifications"
