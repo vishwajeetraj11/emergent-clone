@@ -337,6 +337,43 @@ export class VercelSandboxProvider implements SandboxProvider {
     await entry.sandbox.writeFiles(
       files.map((f) => ({ path: f.path, content: Buffer.from(f.content, "utf8") }))
     );
+
+    // Dependency changes are the one edit hot-reload can't absorb: the VM's
+    // node_modules was installed exactly once, at create time (bootSandbox's
+    // onCreate), so a pushed package.json with a new dependency leaves the dev
+    // server 500ing with "Module not found" until npm install runs again.
+    // Gated strictly on the manifest filename so ordinary source edits stay a
+    // pure writeFiles. Keyed on package.json (not package-lock.json): the
+    // template ships no lockfile and a generated lock can exceed the snapshot
+    // size cap, so package.json is the only manifest guaranteed to sync.
+    const depsChanged = files.some(
+      (f) => f.path === "package.json" || f.path === "package-lock.json"
+    );
+    if (!depsChanged) return;
+
+    const sandbox = entry.sandbox;
+    const url = entry.url;
+
+    // "starting", not "running", while install+restart is in flight — so
+    // checkPreviewHealth treats this as booting (returns true) instead of
+    // probing the mid-restart URL, failing, and deleting the entry.
+    registry.set(sessionId, { sandbox, url, state: "starting" });
+
+    const install = await sandbox.runCommand({ cmd: "npm", args: ["install"] });
+    if (install.exitCode !== 0) {
+      // Mirrors bootSandbox's onCreate install-failure shape above — same
+      // 1500-char tail, same "exit code in the message" framing.
+      const tail = await install.output("both").catch(() => "");
+      const message = `npm install exited with code ${install.exitCode}.${
+        tail.trim() ? `\n${tail.trim().slice(-1500)}` : ""
+      }`;
+      registry.set(sessionId, { sandbox, url, state: "error", message });
+      throw new Error(message);
+    }
+
+    // Restart so Next re-resolves modules against the refreshed node_modules.
+    await this.killDevServer(sandbox);
+    await this.startDevServerAndWait(sessionId, sandbox, url);
   }
 
   /**
@@ -579,13 +616,26 @@ export class VercelSandboxProvider implements SandboxProvider {
     // the port; clear it before starting fresh. No-op when nothing is
     // running.
     if (!created) {
-      await sandbox
-        .runCommand({ cmd: "sh", args: ["-c", "pkill -f next || true; pkill -f 'npm run dev' || true"] })
-        .catch(() => {});
+      await this.killDevServer(sandbox);
     }
 
     if (!created) options?.onStatus?.("Waking the sandbox…");
     options?.onStatus?.("Starting the dev server…");
+    return this.startDevServerAndWait(sessionId, sandbox, url);
+  }
+
+  /** Kills any dev server holding APP_PORT inside the VM. No-op when nothing is running (`|| true` + swallowed errors). */
+  private async killDevServer(sandbox: Sandbox): Promise<void> {
+    await sandbox
+      .runCommand({ cmd: "sh", args: ["-c", "pkill -f next || true; pkill -f 'npm run dev' || true"] })
+      .catch(() => {});
+  }
+
+  private async startDevServerAndWait(
+    sessionId: string,
+    sandbox: Sandbox,
+    url: string
+  ): Promise<SandboxStartResult> {
     try {
       // detached: true — same reason as local's spawnDevServer: this is a
       // long-lived server, not a command we wait to exit. Unlike a local
