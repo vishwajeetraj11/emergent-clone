@@ -231,22 +231,31 @@ export interface AskUserDeps {
  * an import cycle with agent.ts (which owns waitForAnswer & friends and
  * imports this module for the toolsets).
  */
+/**
+ * Raw shape (not wrapped in `z.object`) for ask_user's input — exported so
+ * the Claude CLI runtime backend (src/server/llm-claude-cli.ts) can register
+ * the exact same validation on its own bridged MCP tool, whose `tool()`
+ * (from @anthropic-ai/claude-agent-sdk) wants a bare shape rather than a
+ * `ZodObject`. Both runtimes parse identical input as a result.
+ */
+export const askUserInputShape = {
+  questions: z
+    .array(
+      z.object({
+        question: z.string().min(1),
+        options: z.array(z.string().min(1)).min(2).max(6),
+      })
+    )
+    .min(3)
+    .max(5)
+    .describe("3-5 clarifying questions, each with 2-6 short suggested options"),
+};
+
 export function buildAskUserTool(deps: AskUserDeps) {
   return tool({
     description:
       "Ask the user 3-5 clarifying questions about the app they want built, each with 2-6 short suggested options. Call this exactly once, on your first turn, before writing any plan or doing anything else.",
-    inputSchema: z.object({
-      questions: z
-        .array(
-          z.object({
-            question: z.string().min(1),
-            options: z.array(z.string().min(1)).min(2).max(6),
-          })
-        )
-        .min(3)
-        .max(5)
-        .describe("3-5 clarifying questions, each with 2-6 short suggested options"),
-    }),
+    inputSchema: z.object(askUserInputShape),
     execute: async ({ questions: rawQuestions }) => {
       const toolUseId = randomUUID();
       const questions = deps.normalizeQuestions(rawQuestions);
@@ -278,15 +287,18 @@ export interface ReviewResult {
   findings: string[];
 }
 
+/** Raw shape for report_review's input — see askUserInputShape's comment above; same reasoning, same reuse. */
+export const reportReviewInputShape = {
+  issuesFound: z.boolean(),
+  summary: z.string().min(1),
+  findings: z.array(z.string().min(1)).max(10).default([]),
+};
+
 export function buildReportReviewTool(resultRef: { value: ReviewResult | null }) {
   return tool({
     description:
       "Report the final result of your code review. Call this exactly once, when you have formed your verdict.",
-    inputSchema: z.object({
-      issuesFound: z.boolean(),
-      summary: z.string().min(1),
-      findings: z.array(z.string().min(1)).max(10).default([]),
-    }),
+    inputSchema: z.object(reportReviewInputShape),
     execute: async ({ issuesFound, summary, findings }) => {
       resultRef.value = { issuesFound, summary, findings: findings ?? [] };
       return "Review recorded.";

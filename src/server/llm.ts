@@ -10,6 +10,7 @@ import {
 } from "ai";
 import { MODEL_CATALOG, getModelInfo, type ModelInfo } from "@/lib/models";
 import type { UserApiKeys } from "@/server/user-keys";
+import { runAgentQueryViaClaudeCli } from "@/server/llm-claude-cli";
 
 // ---------------------------------------------------------------------------
 // Provider-agnostic LLM runtime (Vercel AI SDK) — replaces the Claude Agent
@@ -41,10 +42,21 @@ export function isOpenAIConfigured(): boolean {
   return Boolean(process.env.OPENAI_API_KEY || process.env.OPEN_AI_KEY);
 }
 
-/** A provider is available when the platform's own env key is configured OR the caller supplied a BYOK user key for it (see the BYOK note above). */
+/**
+ * Dev-only, platform-operator switch: when set, Anthropic-model calls run on
+ * the local `claude` CLI's own subscription auth (src/server/llm-claude-cli.ts)
+ * instead of the metered ANTHROPIC_API_KEY path — free local testing. See
+ * runAgentQuery's dispatch below for the one place this is actually read
+ * outside of provider availability.
+ */
+export function isClaudeCliRuntime(): boolean {
+  return process.env.AGENT_RUNTIME === "claude-cli";
+}
+
+/** A provider is available when the platform's own env key is configured, the caller supplied a BYOK user key for it (see the BYOK note above), OR — anthropic only — the CLI runtime is active (it authenticates via the CLI's own subscription login, no key of any kind needed). */
 function providerAvailable(provider: ModelInfo["provider"], keys?: UserApiKeys): boolean {
   return provider === "anthropic"
-    ? isAnthropicConfigured() || Boolean(keys?.anthropic)
+    ? isAnthropicConfigured() || isClaudeCliRuntime() || Boolean(keys?.anthropic)
     : isOpenAIConfigured() || Boolean(keys?.openai);
 }
 
@@ -139,6 +151,8 @@ export interface RunAgentQueryOptions {
   maxSteps: number;
   /** BYOK: this job's user-supplied provider key(s), if any (see src/server/user-keys.ts) — threaded to resolveModel, where a user key takes precedence over the platform's env key. */
   apiKeys?: UserApiKeys;
+  /** Working directory for this query's tools (build/review/debug call sites; plan/summary have none). The AI SDK path below ignores it — its tools (src/server/agent-tools.ts) already close over cwd when built. The Claude CLI backend (src/server/llm-claude-cli.ts) passes it through to query()'s own `cwd` option, since its tools are the CLI's native Bash/Read/Write/Edit/Glob/Grep rather than closures. */
+  cwd?: string;
   /** Extra stop conditions beyond the step cap (e.g. hasToolCall("report_review")). */
   stopOnToolCall?: string;
   /** Called with each assistant text chunk, in order. */
@@ -165,6 +179,16 @@ export interface RunAgentQueryResult {
  * non-Anthropic providers).
  */
 export async function runAgentQuery(options: RunAgentQueryOptions): Promise<RunAgentQueryResult> {
+  // Dispatch: CLI mode is a platform-operator env setting for free local
+  // testing, not a per-job BYOK choice — a job's user-supplied anthropic key
+  // (options.apiKeys.anthropic) does NOT opt back out of it once
+  // AGENT_RUNTIME=claude-cli is set; every anthropic-model call in this
+  // process goes through the CLI regardless. OpenAI models always fall
+  // through to the AI SDK path below (mixed runtimes per job are fine).
+  if (isClaudeCliRuntime() && getModelInfo(options.modelId)?.provider === "anthropic") {
+    return runAgentQueryViaClaudeCli(options);
+  }
+
   const abortController = new AbortController();
   const stopWhen: StopCondition<ToolSet>[] = [stepCountIs(options.maxSteps)];
   if (options.stopOnToolCall) stopWhen.push(hasToolCall(options.stopOnToolCall));

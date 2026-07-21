@@ -723,6 +723,7 @@ async function runBuildQuery(
     modelId: builderModel,
     system: dbAware(BUILD_SYSTEM_PROMPT, BUILD_DB_NOTE),
     prompt,
+    cwd,
     tools: { ...buildFileTools(cwd), ask_user: askUserToolFor(jobId) },
     maxSteps: BUILD_MAX_ITERATIONS,
     apiKeys: getJobApiKeys(jobId),
@@ -784,6 +785,7 @@ The app exists to satisfy the request below — review it against that intent, n
 
 Original request: ${originalPrompt}
 ${planText ? `\nApproved plan:\n${planText}` : ""}`,
+    cwd,
     tools: { bash, read, glob, grep, report_review: buildReportReviewTool(resultRef) },
     maxSteps: REVIEW_MAX_ITERATIONS,
     apiKeys: getJobApiKeys(jobId),
@@ -850,6 +852,7 @@ Original request: ${originalPrompt}
 Fix the following issues found in code review:
 
 ${findingsList}`,
+    cwd,
     tools: buildFileTools(cwd),
     maxSteps: DEBUG_MAX_ITERATIONS,
     apiKeys: getJobApiKeys(jobId),
