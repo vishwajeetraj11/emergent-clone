@@ -761,17 +761,29 @@ async function runBuildQuery(
 async function runReviewPhase(
   jobId: string,
   cwd: string,
-  builderModel: string
+  builderModel: string,
+  originalPrompt: string,
+  planText: string
 ): Promise<ReviewResult> {
   const resultRef: { value: ReviewResult | null } = { value: null };
   // Read-only toolset by construction: no write/edit in the review belt.
   const { bash, read, glob, grep } = buildFileTools(cwd);
 
+  // The reviewer runs in a FRESH context — it never saw the planning or
+  // build conversations. Without the request + plan below it could only
+  // judge generic code quality (and would flag deliberate plan decisions as
+  // defects, the classic lossy-handoff failure); with them, "doesn't do
+  // what was asked" becomes a reportable finding and plan choices read as
+  // intentional.
   const result = await runAgentQuery({
     modelId: builderModel,
     system: dbAware(REVIEW_SYSTEM_PROMPT, REVIEW_DB_NOTE),
-    prompt:
-      "Review the app that was just built or edited in this working directory. Report your findings via report_review.",
+    prompt: `Review the app that was just built or edited in this working directory. Report your findings via report_review.
+
+The app exists to satisfy the request below — review it against that intent, not just generic code quality. A mismatch with the request is itself a reportable finding; a choice the plan makes deliberately is not.
+
+Original request: ${originalPrompt}
+${planText ? `\nApproved plan:\n${planText}` : ""}`,
     tools: { bash, read, glob, grep, report_review: buildReportReviewTool(resultRef) },
     maxSteps: REVIEW_MAX_ITERATIONS,
     apiKeys: getJobApiKeys(jobId),
@@ -817,17 +829,27 @@ async function runDebugPhase(
   jobId: string,
   cwd: string,
   review: ReviewResult,
-  builderModel: string
+  builderModel: string,
+  originalPrompt: string
 ): Promise<void> {
   const findingsList =
     review.findings.length > 0
       ? review.findings.map((finding, i) => `${i + 1}. ${finding}`).join("\n")
       : review.summary;
 
+  // Same fresh-context problem as runReviewPhase above: a debugger that
+  // only sees finding strings will happily "fix" its way past the user's
+  // intent. The original request anchors every fix to what the app is for.
   const result = await runAgentQuery({
     modelId: builderModel,
     system: dbAware(DEBUG_SYSTEM_PROMPT, BUILD_DB_NOTE),
-    prompt: `Fix the following issues found in code review:\n\n${findingsList}`,
+    prompt: `The app in this working directory was built for this request — keep every fix consistent with it:
+
+Original request: ${originalPrompt}
+
+Fix the following issues found in code review:
+
+${findingsList}`,
     tools: buildFileTools(cwd),
     maxSteps: DEBUG_MAX_ITERATIONS,
     apiKeys: getJobApiKeys(jobId),
@@ -907,14 +929,16 @@ async function runReviewAndDebugTail(
   jobId: string,
   sessionId: string,
   cwd: string,
-  builderModel: string
+  builderModel: string,
+  originalPrompt: string,
+  planText: string
 ): Promise<void> {
-  const review = await runReviewPhase(jobId, cwd, builderModel);
+  const review = await runReviewPhase(jobId, cwd, builderModel, originalPrompt, planText);
   if (await isStopped(jobId)) return;
 
   if (!review.issuesFound) return;
 
-  await runDebugPhase(jobId, cwd, review, builderModel);
+  await runDebugPhase(jobId, cwd, review, builderModel, originalPrompt);
   if (await isStopped(jobId)) return;
 
   const changed = await snapshotSessionFiles(sessionId, cwd);
@@ -1025,7 +1049,7 @@ ${planText || "(no additional plan text was captured — use the original reques
   // running) rather than failing the whole job and tearing down a working
   // live preview over a review pass that merely couldn't complete.
   try {
-    await runReviewAndDebugTail(jobId, sessionId, sandboxDir, builderModel);
+    await runReviewAndDebugTail(jobId, sessionId, sandboxDir, builderModel, originalPrompt, planText);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await appendEvent(jobId, "system", "error", {
