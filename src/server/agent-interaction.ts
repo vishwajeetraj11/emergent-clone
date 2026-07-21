@@ -1,7 +1,7 @@
 import { appendEvent, getAllEvents, type EventRow } from "@/server/events";
 import { setJobStatus } from "@/server/jobs";
 import { buildAskUserTool } from "@/server/agent-tools";
-import { ANSWER_POLL_INTERVAL_MS, isStopped, sleep } from "@/server/agent";
+import { ANSWER_POLL_INTERVAL_MS, isStopped, sleep } from "@/server/agent-core";
 import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
