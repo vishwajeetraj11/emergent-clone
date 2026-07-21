@@ -10,7 +10,8 @@ import path from "node:path";
 // method body, never at that module's own top level, so it's never touched
 // before this module has finished initializing it. See sandbox-vercel.ts's
 // own imports for the other half of this.
-import { isVercelSandboxConfigured, VercelSandboxProvider } from "./sandbox-vercel";
+import { VercelSandboxProvider } from "./sandbox-vercel";
+import { isVercelSandboxConfigured } from "./sandbox-vercel-config";
 import { writeSandboxEnvFile } from "./project-db";
 
 // ---------------------------------------------------------------------------
