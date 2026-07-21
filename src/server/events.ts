@@ -26,6 +26,16 @@ export async function appendEvent(
   for (let attempt = 0; attempt < MAX_APPEND_RETRIES; attempt++) {
     try {
       return await db.transaction(async (tx) => {
+        // Serialize appends per job: the select-max + insert below is a
+        // read-then-write race under concurrent appenders (an onStatus
+        // callback firing alongside the main flow's own append was observed
+        // live exhausting all retries and silently dropping the losing
+        // event). A transaction-scoped advisory lock keyed on the job id
+        // makes concurrent appends for the SAME job queue instead of
+        // collide — released automatically at commit/rollback, and appends
+        // for different jobs don't contend at all. The unique-violation
+        // retry loop stays as a belt for lock-free writers elsewhere.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${jobId}))`);
         const [row] = await tx
           .select({ maxSeq: sql<number>`coalesce(max(${events.seq}), -1)` })
           .from(events)
