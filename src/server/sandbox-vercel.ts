@@ -605,9 +605,16 @@ export class VercelSandboxProvider implements SandboxProvider {
       throw new Error(`Failed to start the dev server: ${message}`);
     }
 
-    const ready = await waitForUrlReady(url, 60_000);
+    // 180s, not 60: this wait covers BOTH the create path (npm install
+    // already done above, dev server compiles a near-empty template fast)
+    // and the RESUME path, where a stopped VM must boot and Next must
+    // cold-compile a real, fully-built app — observed live blowing a 60s
+    // budget on a ~15-route app and failing the job even though the resume
+    // itself was healthy. The create path only pays this length when
+    // something is genuinely wrong.
+    const ready = await waitForUrlReady(url, 180_000);
     if (!ready) {
-      const message = `Dev server on ${url} did not respond within 60s.`;
+      const message = `Dev server on ${url} did not respond within 180s.`;
       registry.set(sessionId, { sandbox, url, state: "error", message });
       throw new Error(message);
     }
