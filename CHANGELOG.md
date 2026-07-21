@@ -27,6 +27,11 @@ Anthropic key does not opt back out of CLI mode once it's set. Leaving
 `AGENT_RUNTIME` unset keeps the metered AI SDK runtime as the only path, byte
 for byte.
 
+Also split the now-larger `src/server/agent.ts` along its own section
+headers — prompts/DB notes into `agent-prompts.ts`, the mock trajectory into
+`agent-mock.ts`, the ask_user machinery into `agent-interaction.ts` — pure
+moves, no behavior change.
+
 ## 2026-07-21 — Fix context loss at the review/debug agent handoffs
 
 **Bug.** The agent pipeline (plan → build → review → debug) runs each phase

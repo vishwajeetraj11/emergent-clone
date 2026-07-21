@@ -3,27 +3,35 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { appendEvent, getAllEvents, type EventRow } from "@/server/events";
+import { appendEvent, getAllEvents } from "@/server/events";
 import { getJob, setJobStatus } from "@/server/jobs";
 import {
   runAgentQuery,
   resolvePlannerModel,
   resolveBuilderModel,
 } from "@/server/llm";
+import { buildFileTools, buildReportReviewTool, type ReviewResult } from "@/server/agent-tools";
 import {
-  buildFileTools,
-  buildAskUserTool,
-  buildReportReviewTool,
-  type ReviewResult,
-} from "@/server/agent-tools";
+  BUILD_SYSTEM_PROMPT,
+  SYSTEM_PROMPT,
+  PLAN_REVISION_SYSTEM_PROMPT,
+  CONTINUATION_PLANNING_SYSTEM_PROMPT,
+  REVIEW_SYSTEM_PROMPT,
+  DEBUG_SYSTEM_PROMPT,
+  PLANNER_DB_NOTE,
+  BUILD_DB_NOTE,
+  REVIEW_DB_NOTE,
+  dbAware,
+} from "@/server/agent-prompts";
+import { isMockMode, runMockLoop } from "@/server/agent-mock";
+import { askUserToolFor } from "@/server/agent-interaction";
 import { sandboxProvider, seedSandboxTemplate, type SnapshotFile } from "@/server/sandbox";
 import { getSessionFiles, snapshotSessionFiles } from "@/server/files";
 import { debitForJobUsage } from "@/server/credits";
 import { getProjectAgentContext } from "@/server/projects";
-import { isNeonConfigured, writeSandboxEnvFile } from "@/server/project-db";
+import { writeSandboxEnvFile } from "@/server/project-db";
 import { getJobApiKeys, clearJobApiKeys } from "@/server/user-keys";
 import { getModelInfo } from "@/lib/models";
-import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Multi-agent orchestration: Plan (Opus) -> user approves/revises -> Build
@@ -96,7 +104,9 @@ import type { AnswerItem, Question } from "@/lib/types";
 
 const MAX_ITERATIONS = 15;
 const MAX_PLAN_REVISIONS = 5;
-const ANSWER_POLL_INTERVAL_MS = 800;
+// Exported: shared with agent-interaction.ts's waitForAnswer, which polls
+// this same events table on the same cadence as waitForPlanDecision below.
+export const ANSWER_POLL_INTERVAL_MS = 800;
 
 // Build phase gets a much larger iteration budget than planning — it's
 // actually writing/editing files and running commands, not just asking a
@@ -105,152 +115,9 @@ const BUILD_MAX_ITERATIONS = 60;
 const REVIEW_MAX_ITERATIONS = 20;
 const DEBUG_MAX_ITERATIONS = 40;
 
-// Explicit allowlist (checked against node_modules/@anthropic-ai/claude-agent-sdk
-// sdk.d.ts's `Options.tools` — `string[] | { type: 'preset'; preset: 'claude_code' }`)
-// rather than the `claude_code` preset, so each phase gets exactly the tools
-// it needs and nothing else (no WebFetch/WebSearch/Task/...).
-const BUILD_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"];
-// Review is read-only by design (plus Bash, so it can run a real compile
-// check like `npm run build` rather than guessing from source alone) — no
-// Write/Edit, since reviewing and fixing are deliberately separate passes.
-const REVIEW_TOOLS = ["Bash", "Read", "Glob", "Grep"];
-
-const BUILD_SYSTEM_PROMPT = `You are the build agent inside an Emergent-style AI app builder. You already scoped this app with the user in an earlier turn — you have their answers and you already wrote a build plan. You do not need to ask them anything else; build directly.
-
-Your working directory already contains a minimal Next.js (App Router) + Tailwind starter template — package.json, app/layout.tsx, app/page.tsx, tailwind/postcss config. A real \`npm run dev\` dev server for this directory is already running and being live-previewed, so:
-- Edit the existing files and add new ones to build the actual app described in the plan and the user's answers.
-- Keep \`npm run dev\` working — don't leave the app in a state that fails to compile. Feel free to use Bash to sanity-check (e.g. \`npm run build\`) if you're unsure. Known false positive: this template's \`npm run build\` can fail to statically prerender a \`/_global-error\` route even when the app is completely fine — that's a pre-existing quirk of the starter template, not something you caused; don't spend time chasing it if you see it.
-- If you need an additional npm package, install it yourself via Bash (\`npm install <package>\`).
-- Keep changes scoped to what was actually asked for — don't build unrelated features.
-- Do not run any command or read/write any file outside this working directory.
-
-The user's message may be a build/edit instruction, a plain question about the project (e.g. "is my GitHub connected?", "has this been deployed?", "how many credits do I have left?"), or both. Your prompt includes a "Project context" block with the real, current answers to exactly that kind of question — use it to answer directly instead of guessing from sandbox files (they don't contain account/connector state) or claiming you have no way to know. Only touch files when the message actually asks for a build/edit.
-
-Never reference the identity, email address, or account details of whoever is authenticated on the underlying CLI session.`;
-
-const SYSTEM_PROMPT = `You are the planning agent inside an Emergent-style AI app builder. A user just described an app they want built in a chat box.
-
-Your job in this phase is ONLY to scope the work and write a plan — a separate builder agent writes the actual code in a later phase. You have exactly one tool available, named ask_user; you have no filesystem, shell, or web access.
-
-Never reference the identity, email address, or account details of whoever is authenticated on the underlying CLI session — you are building an app for an end user you know nothing about, not for the operator of this environment. Do not suggest "use my email X" or similar as an answer option.
-
-On your very first turn you MUST call the ask_user tool with 3-5 short clarifying questions about the app (e.g. target platform, data model, auth, must-have features, design style). Give each question 2-6 concrete suggested options.
-
-After the user answers, write a short build plan (4-8 concise bullet points, plain text, no code) summarizing what you will build, directly informed by their answers. The user will review this plan and may ask you to change it before anything gets built.`;
-
-/**
- * Used for every revision pass (fresh-build or continuation), regardless of
- * which system prompt produced the original plan — the ask_user tool stays
- * registered but the model is told to use it sparingly, since the point of
- * a revision is usually just "apply this feedback", not re-scope from zero.
- */
-const PLAN_REVISION_SYSTEM_PROMPT = `You are the planning agent inside an Emergent-style AI app builder. You already wrote a build plan and the user has asked for changes to it.
-
-You have exactly one tool available, ask_user — only use it if the requested change is genuinely ambiguous in a way that risks doing the wrong thing; most revision requests can be applied directly without asking anything.
-
-Write a revised build plan (4-8 concise bullet points, plain text, no code) that actually incorporates the requested changes — don't just repeat the previous plan.`;
-
-/**
- * Continuation ("keep chatting") planning, only used when the user opts a
- * follow-up message into Plan mode — adapts CONTINUATION_PLAN_TEXT's "this
- * is an edit, not a fresh build" framing into a planning-phase prompt.
- */
-const CONTINUATION_PLANNING_SYSTEM_PROMPT = `You are the planning agent inside an Emergent-style AI app builder. This is a follow-up request against an app that already exists and is running in a working directory you don't have access to yet — it is NOT a fresh build.
-
-You have exactly one tool available, ask_user — only use it if the request is genuinely ambiguous in a way that risks doing the wrong thing; for a straightforward request, don't ask anything and go straight to writing the plan.
-
-Write a short edit plan (2-6 concise bullet points, plain text, no code) describing exactly what you will change, directly informed by the user's request. The user will review this plan and may ask you to change it before anything gets built.`;
-
-const REVIEW_SYSTEM_PROMPT = `You are the code review agent inside an Emergent-style AI app builder. Another agent just built or edited the app in this working directory.
-
-Inspect the actual code — read the files that were touched, check they're internally consistent. Look for real, concrete problems: broken imports, mismatched types, obviously wrong logic, a component referencing a file that doesn't exist. Do not nitpick style or invent hypothetical issues — only report things that would actually break or visibly misbehave.
-
-Known false positive, do not chase this: this template's \`npm run build\` can fail to statically prerender a \`/_global-error\` route even when the app itself is completely fine — that is a pre-existing quirk of this starter template, not something caused by the edit you're reviewing. If you see it, ignore it; it is not a reportable issue. Checking that the actual page(s) touched by the edit render correctly (one curl/fetch against the already-running dev server is enough) is far more informative here than a full \`npm run build\`.
-
-Be decisive and efficient — you are not debugging, you are forming a verdict. A couple of Read/Grep calls plus at most one quick check against the running dev server is normally enough. Do not spin up additional dev servers on other ports, do not repeatedly rerun the same check, and do not keep digging once you have a reasonably confident answer. Call report_review as soon as you're confident either way — a review that runs out of turns without calling it is a worse outcome than a slightly less thorough one that does.
-
-You have Bash/Read/Glob/Grep tools. You have exactly one other tool, report_review — call it exactly once, at the end, with your findings. Do not edit any files; you are reviewing, not fixing.`;
-
-const DEBUG_SYSTEM_PROMPT = `You are the debugging agent inside an Emergent-style AI app builder. A code review just found issues in this working directory that need fixing.
-
-Fix each issue listed in your prompt. Read whatever files you need to understand the problem before changing anything. Keep \`npm run dev\` working — sanity-check with \`npm run build\` via Bash if you're unsure. Keep changes scoped to fixing the reported issues; do not refactor or add unrelated features.`;
-
-// ---------------------------------------------------------------------------
-// Per-app database notes, appended to the phase system prompts only when the
-// Neon integration is configured (src/server/project-db.ts). NEON_API_KEY is
-// read once per process, so module-scope evaluation is safe — and when it's
-// absent, every prompt is byte-identical to the pre-database behavior.
-// ---------------------------------------------------------------------------
-
-const PLANNER_DB_NOTE = `
-
-Database: every app built here gets its own dedicated Postgres database, reachable by the app's server-side code at runtime via process.env.DATABASE_URL. If the app needs persistence (accounts, saved items, submissions…), plan on real Postgres storage rather than in-memory or localStorage-only state — the builder agent knows how to wire it up.`;
-
-const BUILD_DB_NOTE = `
-
-Database: this app has its own dedicated Postgres database. Its connection string should already be in \`.env.local\` in the working directory as DATABASE_URL — \`next dev\` loads that file automatically, so server-side code can just use process.env.DATABASE_URL. If the app needs persistence: install a driver yourself via Bash (e.g. \`npm install postgres\`), create tables idempotently (CREATE TABLE IF NOT EXISTS) on first use, and query from server components / route handlers only — never from client components. If \`.env.local\` is missing, the database wasn't provisioned; build without persistence rather than inventing a connection string. Never print, hardcode, or commit the connection string, and never overwrite or delete \`.env.local\`.`;
-
-const REVIEW_DB_NOTE = `
-
-Note: a \`.env.local\` containing DATABASE_URL in the working directory is expected platform infrastructure (the app's own Postgres database) — its presence is not a finding, and code using process.env.DATABASE_URL server-side is correct. Never print that file's contents.`;
-
-/** Appends `note` when the per-app database integration is active. */
-function dbAware(prompt: string, note: string): string {
-  return isNeonConfigured() ? prompt + note : prompt;
-}
-
-const WHIMSICAL_STATUS_LINES = [
-  "Making things click…",
-  "Brewing something nice…",
-  "Sketching the blueprint…",
-  "Tidying up the loose ends…",
-];
-
-const MOCK_QUESTIONS: Question[] = [
-  {
-    id: "q1",
-    question: "What kind of app should I build?",
-    options: ["Quiz builder", "Task tracker", "Recipe organizer", "Something else"],
-  },
-  {
-    id: "q2",
-    question: "Which authentication method do you want?",
-    options: [
-      "Email + password",
-      "Magic link",
-      "No auth (single user)",
-      "Social login",
-    ],
-  },
-  {
-    id: "q3",
-    question: "Any must-have features for v1?",
-    options: [
-      "Dark mode",
-      "Real-time collaboration",
-      "Export to PDF",
-      "Keep it minimal",
-    ],
-  },
-];
-
-const MOCK_PLAN_TEXT = `Here's the plan:
-- Set up a Next.js + Tailwind frontend with a clean, minimal layout
-- Model the core entities based on your answers
-- Wire up the auth method you picked
-- Build the primary flow end-to-end before adding extras
-- Add the must-have feature you called out
-- Leave room to iterate once you see the first working version`;
-
-const MOCK_SUMMARY_TEXT =
-  "Scoping is complete — I have what I need to start building. Real code generation lands in a later phase; for now this job is done.";
-
-function sleep(ms: number) {
+/** Exported: agent-mock.ts and agent-interaction.ts both poll on this same trivial timer. */
+export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isMockMode(): boolean {
-  return process.env.MOCK_AGENT === "1";
 }
 
 /**
@@ -321,23 +188,10 @@ export async function runAgentLoop(jobId: string): Promise<void> {
   }
 }
 
-async function isStopped(jobId: string): Promise<boolean> {
+/** Exported: agent-mock.ts's runMockLoop and agent-interaction.ts's waitForAnswer both need the same "has this job been stopped/finished" check this file's own phase functions poll throughout. */
+export async function isStopped(jobId: string): Promise<boolean> {
   const job = await getJob(jobId);
   return !job || job.status === "stopped" || job.status === "done" || job.status === "failed";
-}
-
-function countUnansweredQuestions(allEvents: EventRow[]): number {
-  const answeredIds = new Set(
-    allEvents
-      .filter((e) => e.type === "answer")
-      .map((e) => (e.payload as { toolUseId?: string }).toolUseId)
-      .filter((id): id is string => Boolean(id))
-  );
-  return allEvents.filter(
-    (e) =>
-      e.type === "question" &&
-      !answeredIds.has((e.payload as { toolUseId?: string }).toolUseId ?? "")
-  ).length;
 }
 
 async function handleAgentError(jobId: string, err: unknown) {
@@ -352,89 +206,8 @@ async function handleAgentError(jobId: string, err: unknown) {
 }
 
 // ---------------------------------------------------------------------------
-// Mock trajectory
-// ---------------------------------------------------------------------------
-
-async function runMockLoop(jobId: string): Promise<void> {
-  const allEvents = await getAllEvents(jobId);
-  if (await isStopped(jobId)) return;
-
-  const hasQuestion = allEvents.some((e) => e.type === "question");
-  if (!hasQuestion) {
-    const toolUseId = "mock-ask-user-1";
-    await appendEvent(jobId, "assistant", "tool_call", {
-      id: toolUseId,
-      name: "ask_user",
-      input: { questions: MOCK_QUESTIONS },
-    });
-    await appendEvent(jobId, "assistant", "question", {
-      toolUseId,
-      questions: MOCK_QUESTIONS,
-    });
-    await setJobStatus(jobId, "waiting_on_user");
-    return;
-  }
-
-  if (countUnansweredQuestions(allEvents) > 0) return; // still waiting
-
-  const hasPlan = allEvents.some((e) => e.type === "plan");
-  if (!hasPlan) {
-    const planEventId = "mock-plan-1";
-    await appendEvent(jobId, "assistant", "assistant_message", {
-      text: MOCK_PLAN_TEXT,
-    });
-
-    for (const line of WHIMSICAL_STATUS_LINES) {
-      if (await isStopped(jobId)) return;
-      await appendEvent(jobId, "assistant", "status", { text: line });
-      await sleep(900);
-    }
-
-    if (await isStopped(jobId)) return;
-    await appendEvent(jobId, "assistant", "plan", {
-      id: planEventId,
-      text: MOCK_PLAN_TEXT,
-      revision: 0,
-    });
-    await setJobStatus(jobId, "waiting_on_plan");
-    return;
-  }
-
-  const latestPlan = [...allEvents].reverse().find((e) => e.type === "plan");
-  const planEventId = (latestPlan?.payload as { id?: string } | undefined)?.id;
-  const decision = allEvents.find(
-    (e) =>
-      e.type === "plan_decision" &&
-      (e.payload as { planEventId?: string }).planEventId === planEventId
-  );
-  if (!decision) return; // still waiting on the plan decision
-
-  await appendEvent(jobId, "assistant", "assistant_message", {
-    text: MOCK_SUMMARY_TEXT,
-  });
-  await setJobStatus(jobId, "done");
-}
-
-// ---------------------------------------------------------------------------
 // Real trajectory (Claude Agent SDK, local `claude` CLI auth)
 // ---------------------------------------------------------------------------
-
-function normalizeQuestions(raw: unknown): Question[] {
-  const arr = Array.isArray(raw) ? raw : [];
-  return arr.slice(0, 5).map((q, i) => {
-    const record = q as { question?: unknown; options?: unknown };
-    const question =
-      typeof record.question === "string" ? record.question : `Question ${i + 1}`;
-    const options = Array.isArray(record.options)
-      ? record.options.filter((o): o is string => typeof o === "string").slice(0, 6)
-      : [];
-    return { id: `q${i + 1}`, question, options };
-  });
-}
-
-function formatAnswersAsToolResult(answers: AnswerItem[]): string {
-  return answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n");
-}
 
 /**
  * Renders the DB-backed facts a chat message might ask about (GitHub
@@ -463,46 +236,6 @@ function ensureJobScratchDir(jobId: string): string {
   const dir = join(tmpdir(), "emergent-agent-jobs", jobId);
   mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-/**
- * Polls the events table (same ~800ms polling style as the SSE route) until
- * an `answer` event for this toolUseId appears, or the job is stopped out
- * from under us. Runs *inside* the ask_user tool handler, so the SDK's
- * query() call — and the underlying `claude` CLI process — stays alive for
- * the whole wait.
- */
-async function waitForAnswer(
-  jobId: string,
-  toolUseId: string
-): Promise<AnswerItem[] | null> {
-  while (true) {
-    if (await isStopped(jobId)) return null;
-
-    const allEvents = await getAllEvents(jobId);
-    const answerEvent = allEvents.find(
-      (e) =>
-        e.type === "answer" &&
-        (e.payload as { toolUseId?: string }).toolUseId === toolUseId
-    );
-    if (answerEvent) {
-      return (answerEvent.payload as { answers?: AnswerItem[] }).answers ?? [];
-    }
-
-    await sleep(ANSWER_POLL_INTERVAL_MS);
-  }
-}
-
-/** The blocking ask_user tool, wired to this module's event/poll helpers — see buildAskUserTool in agent-tools.ts for why deps are injected. */
-function askUserToolFor(jobId: string) {
-  return buildAskUserTool({
-    jobId,
-    appendEvent,
-    setJobStatus,
-    waitForAnswer,
-    normalizeQuestions,
-    formatAnswersAsToolResult,
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -672,7 +405,7 @@ Write a revised plan.`;
  * planner model since it's narrating the plan, not writing code. Does not
  * set job status; the build phase that follows owns the terminal status.
  */
-async function runSummaryQuery(jobId: string, _cwd: string): Promise<void> {
+async function runSummaryQuery(jobId: string): Promise<void> {
   const apiKeys = getJobApiKeys(jobId);
   const plannerModel = resolvePlannerModel(apiKeys);
   const result = await runAgentQuery({
@@ -1105,7 +838,7 @@ async function runInitialBuildFlow(
   if (planText === null) return;
   if (await isStopped(jobId)) return;
 
-  await runSummaryQuery(jobId, cwd);
+  await runSummaryQuery(jobId);
   if (await isStopped(jobId)) return;
 
   const job = await getJob(jobId);
