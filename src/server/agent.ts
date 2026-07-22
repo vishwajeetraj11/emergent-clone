@@ -233,8 +233,10 @@ async function waitForPlanDecision(
 /**
  * Runs the planner (possibly several revision rounds) until the user
  * approves a plan, and returns that plan's text — or null if the job was
- * stopped, failed, or hit the revision cap (all of which already recorded
- * their own error/status; the caller should just return).
+ * stopped or failed (both of which already recorded their own error/status;
+ * the caller should just return). Hitting the revision cap
+ * (MAX_PLAN_REVISIONS) no longer fails the job: the last allowed plan is
+ * flagged final and re-presented for an approve-or-stop decision.
  */
 async function runPlanningPhase(
   jobId: string,
@@ -262,35 +264,46 @@ async function runPlanningPhase(
     }
     requireAskUser = false; // only enforced on the very first planning pass
 
-    const planEventId = randomUUID();
-    await appendEvent(jobId, "assistant", "plan", {
-      id: planEventId,
-      text: result.planText,
-      revision,
-    });
-    await setJobStatus(jobId, "waiting_on_plan");
+    // Once the revision budget is spent this plan is the final one: past the
+    // cap we no longer regenerate, we re-present the same plan for a last
+    // approve-or-stop decision rather than failing the whole job.
+    const isFinal = revision >= MAX_PLAN_REVISIONS;
 
-    const decision = await waitForPlanDecision(jobId, planEventId);
-    if (decision === null) return null; // stopped
-
-    if (decision.action === "approve") {
-      return result.planText;
-    }
-
-    revision += 1;
-    if (revision > MAX_PLAN_REVISIONS) {
-      await appendEvent(jobId, "system", "error", {
-        message: `Reached the maximum of ${MAX_PLAN_REVISIONS} plan revisions for this job.`,
+    // Inner loop: present this plan and act on the user's decision. A
+    // non-final plan breaks out to regenerate a revision; a final plan stays
+    // here, re-showing the same text on any stray "revise" (the UI hides that
+    // action on a final plan, so this only guards an out-of-band decision).
+    while (true) {
+      const planEventId = randomUUID();
+      await appendEvent(jobId, "assistant", "plan", {
+        id: planEventId,
+        text: result.planText,
+        revision,
+        isFinal,
       });
-      await setJobStatus(jobId, "failed");
-      return null;
-    }
+      await setJobStatus(jobId, "waiting_on_plan");
 
-    if (await isStopped(jobId)) return null;
-    await setJobStatus(jobId, "running");
+      const decision = await waitForPlanDecision(jobId, planEventId);
+      if (decision === null) return null; // stopped
 
-    systemPrompt = PLAN_REVISION_SYSTEM_PROMPT;
-    userPrompt = `Original request: ${initialUserPrompt}
+      if (decision.action === "approve") {
+        return result.planText;
+      }
+
+      if (isFinal) {
+        await appendEvent(jobId, "system", "assistant_message", {
+          text: `You've reached the maximum of ${MAX_PLAN_REVISIONS} plan revisions. This is the final plan — approve it to start building, or stop here.`,
+        });
+        if (await isStopped(jobId)) return null;
+        continue; // re-present the same final plan; do not regenerate
+      }
+
+      revision += 1;
+      if (await isStopped(jobId)) return null;
+      await setJobStatus(jobId, "running");
+
+      systemPrompt = PLAN_REVISION_SYSTEM_PROMPT;
+      userPrompt = `Original request: ${initialUserPrompt}
 
 Previous plan:
 ${result.planText}
@@ -298,6 +311,8 @@ ${result.planText}
 The user asked for these changes: ${decision.feedback?.trim() || "(no specific feedback given — use your best judgement about what to change)"}
 
 Write a revised plan.`;
+      break; // regenerate at the outer loop
+    }
   }
 }
 

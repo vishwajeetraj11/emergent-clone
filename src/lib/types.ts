@@ -34,7 +34,8 @@ export type TimelineEventType =
   // payload: { url: string }.
   | "preview_ready"
   // Orchestration: a plan is ready for the user's approve/revise decision —
-  // payload: { id: string, text: string, revision: number }.
+  // payload: { id: string, text: string, revision: number, isFinal?: boolean }.
+  // isFinal marks the last plan allowed by the revision cap (approve-or-stop only).
   | "plan"
   // Orchestration: the user's response to a "plan" event — payload:
   // { planEventId: string, action: "approve" | "revise", feedback?: string }.

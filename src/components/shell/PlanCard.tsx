@@ -15,6 +15,7 @@ export function PlanCard({
   planEventId,
   text,
   revision,
+  isFinal,
   decision,
   disabled,
   onDecide,
@@ -22,6 +23,9 @@ export function PlanCard({
   planEventId: string;
   text: string;
   revision: number;
+  /** True on the last plan allowed by the revision cap — "Request changes" is
+   * hidden (approve or stop only) and a note explains why. */
+  isFinal?: boolean;
   decision: { action: "approve" | "revise"; feedback?: string } | null;
   disabled?: boolean;
   onDecide: (
@@ -66,6 +70,11 @@ export function PlanCard({
 
       {!decided && (
         <div className="flex flex-col gap-2">
+          {isFinal && !showFeedbackInput && (
+            <p className="text-[10px] text-muted-foreground">
+              Revision limit reached — this is the final plan. Approve it to start building, or stop.
+            </p>
+          )}
           {showFeedbackInput && (
             <textarea
               value={feedback}
@@ -101,14 +110,16 @@ export function PlanCard({
               </>
             ) : (
               <>
-                <button
-                  type="button"
-                  onClick={() => setShowFeedbackInput(true)}
-                  disabled={disabled}
-                  className="rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-secondary disabled:opacity-40"
-                >
-                  Request changes
-                </button>
+                {!isFinal && (
+                  <button
+                    type="button"
+                    onClick={() => setShowFeedbackInput(true)}
+                    disabled={disabled}
+                    className="rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-secondary disabled:opacity-40"
+                  >
+                    Request changes
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => onDecide(planEventId, "approve")}

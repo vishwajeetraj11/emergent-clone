@@ -110,6 +110,7 @@ export function Timeline({
               id?: string;
               text?: string;
               revision?: number;
+              isFinal?: boolean;
             };
             if (!payload.id || !payload.text) return null;
             const decision = findPlanDecisionFor(events, payload.id);
@@ -119,6 +120,7 @@ export function Timeline({
                 planEventId={payload.id}
                 text={payload.text}
                 revision={payload.revision ?? 0}
+                isFinal={payload.isFinal ?? false}
                 decision={decision}
                 disabled={planDisabled}
                 onDecide={onPlanDecision ?? (() => {})}
