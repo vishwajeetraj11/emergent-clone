@@ -2,6 +2,34 @@
 
 Notable changes to the Emergent clone. Newest first.
 
+## 2026-07-22 — Move the builder to `/dashboard`, make `/` the landing page for everyone
+
+**Before.** `/` meant two different things depending on who was looking:
+`AppShell` for signed-in visitors, `LandingPage` for signed-out ones. A link
+to the product's front door showed an existing user their own dashboard
+instead of the pitch, and there was no stable URL for the marketing page.
+
+**Now.** `/` is the landing page for everyone; the builder lives at
+`/dashboard` (`src/app/dashboard/page.tsx`, which sends signed-out visitors
+to `/sign-in` rather than rendering a shell whose every API call would 404 on
+ownership). Since signed-in visitors now see the landing page too, its header
+swaps "Sign in / Get started" for "Go to dashboard" via Clerk's
+`<Show when="signed-in">` — this Clerk major replaced the old
+`SignedIn`/`SignedOut` components with it. `AppShell`'s Home button points at
+`/dashboard`, since "home" there means the builder's empty state, not the
+marketing page.
+
+Post-auth redirects are set as `signInFallbackRedirectUrl` /
+`signUpFallbackRedirectUrl` props on `<ClerkProvider>` (`ClerkGate`) so the
+routing lives in version control next to the routes it names. They take
+precedence over `NEXT_PUBLIC_CLERK_SIGN_{IN,UP}_FALLBACK_REDIRECT_URL`, which
+should be updated to `/dashboard` in every environment for consistency.
+
+**Unconfigured (dev, default) is unchanged in spirit:** with no Clerk keys
+there is no sign-in flow behind the landing page's CTAs, so every button on
+it would dead-end. That mode redirects `/` straight to `/dashboard`,
+preserving the single-user experience the root route had.
+
 ## 2026-07-22 — Give the three slowest fetches an actual loading state
 
 **Bug.** Projects, credits, and session history each take seconds, and none

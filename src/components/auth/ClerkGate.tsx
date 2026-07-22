@@ -13,5 +13,19 @@ export async function ClerkGate({ children }: { children: ReactNode }) {
   }
 
   const { ClerkProvider } = await import("@clerk/nextjs");
-  return <ClerkProvider>{children}</ClerkProvider>;
+  // Post-auth landing is /dashboard, not `/` — `/` is the marketing page, so
+  // without these a fresh sign-in drops the user back on the pitch instead of
+  // the product. Set here rather than via
+  // NEXT_PUBLIC_CLERK_SIGN_{IN,UP}_FALLBACK_REDIRECT_URL so the routing lives
+  // in version control next to the routes it names; these props take
+  // precedence over those env vars, which still read `/` in existing
+  // environments.
+  return (
+    <ClerkProvider
+      signInFallbackRedirectUrl="/dashboard"
+      signUpFallbackRedirectUrl="/dashboard"
+    >
+      {children}
+    </ClerkProvider>
+  );
 }
