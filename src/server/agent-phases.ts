@@ -20,6 +20,7 @@ import {
 import { askUserToolFor } from "@/server/agent-interaction";
 import { isStopped, recordUsage } from "@/server/agent-core";
 import { sandboxProvider, seedSandboxTemplate, type SnapshotFile } from "@/server/sandbox";
+import { cancelScheduledStop } from "@/server/preview-stop-scheduler";
 import { snapshotSessionFiles } from "@/server/files";
 import { getProjectAgentContext } from "@/server/projects";
 import { writeSandboxEnvFile } from "@/server/project-db";
@@ -331,6 +332,12 @@ export async function runBuildPhase(
   // prompt's ".env.local should already be there" claim) would find nothing.
   // Internally best-effort/no-op when Neon isn't configured.
   await writeSandboxEnvFile(sessionId, sandboxDir);
+
+  // A brand-new build is exactly as strong a "this session is alive" signal
+  // as a restore or a health poll — cancel any stop-preview timer an old
+  // tab's pagehide beacon queued (see preview-stop-scheduler.ts) so it can't
+  // land mid-build and kill the very sandbox this call is about to start.
+  cancelScheduledStop(sessionId);
 
   let previewUrl: string;
   try {

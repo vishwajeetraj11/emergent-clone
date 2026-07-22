@@ -342,7 +342,7 @@ export function useAgentSession() {
   }, [state.project, state.sessionId, state.previewUrl, state.jobStatus]);
 
   /**
-   * Eager teardown on navigate-away/tab-close (the v2 sandbox counterpart
+   * Deferred teardown on navigate-away/tab-close (the v2 sandbox counterpart
    * to the health poll above): `pagehide` — not `visibilitychange` and not
    * `beforeunload` — is the one page-lifecycle event that fires reliably on
    * both a real unload AND a tab close/back-navigation, without
@@ -353,6 +353,17 @@ export function useAgentSession() {
    * safe even if the page later comes back from bfcache — the health poll
    * above then just shows the paused card with a one-click resume, same as
    * any other stop.
+   *
+   * `pagehide` fires identically on a real tab-close AND on a plain page
+   * refresh, so the server no longer stops the sandbox the instant this
+   * beacon lands — /api/sessions/[id]/stop-preview just schedules the stop
+   * a few minutes out (see src/server/preview-stop-scheduler.ts) and the
+   * refresh's own follow-up load (loadProject's restore call, or the health
+   * poll once the preview is back) cancels it before it fires. A real
+   * tab-close never sends that follow-up, so its timer just runs on
+   * schedule. Nothing below needs to change for that: this effect still
+   * fires the same beacon at the same moment, only what the server does
+   * with it is different.
    */
   useEffect(() => {
     if (!state.sessionId || !state.previewUrl) return;
