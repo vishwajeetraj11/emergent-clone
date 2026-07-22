@@ -384,6 +384,20 @@ ${planText || "(no additional plan text was captured — use the original reques
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await appendEvent(jobId, "system", "error", { message: `Build failed: ${message}` });
+    // Persist whatever the build managed to write BEFORE giving up. A build
+    // that throws (hitting the iteration cap, or any error) otherwise leaves
+    // the `files` table empty, so /restore finds no snapshot and "Restart
+    // preview" 404s — the partial app is stranded. Snapshotting here keeps it
+    // restorable and continuable via chat. Best-effort: a snapshot failure
+    // must not mask the original build error. Runs before stop() so the local
+    // sandbox directory is still intact when we read it.
+    const changed = await snapshotSessionFiles(sessionId, sandboxDir).catch((e) => {
+      console.error(`[agent] job ${jobId} failed to snapshot after build failure`, e);
+      return [] as string[];
+    });
+    if (changed.length > 0) {
+      await appendEvent(jobId, "system", "files_changed", { paths: changed });
+    }
     await setJobStatus(jobId, "failed");
     await sandboxProvider.stop(sessionId).catch(() => {});
     return;
