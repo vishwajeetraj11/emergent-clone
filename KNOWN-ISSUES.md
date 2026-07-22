@@ -75,12 +75,14 @@ verbatim preserved no agent customization because there was none:
 | `22004529` | simple-color-140 | Jul 19 | repaired |
 | `cc951e0c` | Habit Tracker | Jul 18 | repaired |
 | `8baf3846` | Habit Tracker | Jul 17 | repaired |
-| `15458342` | pipeline-retest-524 | Jul 19 | **still stale** |
+| `15458342` | pipeline-retest-524 | Jul 19 | repaired |
 
-`15458342-43ec-4090-a4f6-7da35478f506` was not repaired — the write was
-blocked by the local permission classifier partway through the repair. It
-needs the same one-row update: set its `next.config.ts` content to the current
-template file.
+All four are repaired and verified: every `next.config.ts` row in the `files`
+table now contains `allowedDevOrigins`, zero stale. Note the verification is
+of the stored snapshot, not of each app re-rendering — the mechanism itself
+was proven end-to-end on `cc951e0c` (this exact config, hydrated and
+interactive under `next dev`), so the remaining three follow from identical
+data rather than from three separate live checks.
 
 Sessions `9fa95770` (refactor-smoke-225), `2996695c` (orchestration-pipeline-843)
 and `4a1e8157` (raf-batching-321) have **0 files** — they never built, so there
