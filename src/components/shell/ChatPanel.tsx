@@ -396,6 +396,7 @@ export function ChatPanel({
   events,
   jobStatus,
   isStarting,
+  isLoadingProject,
   error,
   hasProject,
   sessionId,
@@ -421,6 +422,8 @@ export function ChatPanel({
   events: TimelineEvent[];
   jobStatus: JobStatus | null;
   isStarting: boolean;
+  /** A project load is in flight (GET /api/projects/[id] + its session history). */
+  isLoadingProject: boolean;
   error: string | null;
   hasProject: boolean;
   sessionId?: string | null;
@@ -559,7 +562,24 @@ export function ChatPanel({
     <aside className="flex h-full min-h-0 w-[440px] shrink-0 flex-col border-r border-border bg-background">
       {/* Timeline */}
       <ScrollArea className="min-h-0 flex-1">
-        {events.length === 0 ? (
+        {events.length === 0 && isLoadingProject ? (
+          // An empty timeline during a project load is "history hasn't
+          // arrived yet", NOT "nothing ever happened" — GET /api/sessions/
+          // [id]/events takes seconds, and claiming "No activity yet" for
+          // that whole window tells the user something false about a session
+          // that may have a long history.
+          <div className="flex flex-col gap-3 px-4 py-4" aria-busy="true">
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="h-16 animate-pulse rounded-md border border-border bg-secondary/30"
+              />
+            ))}
+            <span className="sr-only" role="status">
+              Loading this session…
+            </span>
+          </div>
+        ) : events.length === 0 ? (
           <div className="flex h-full min-h-[420px] flex-col items-center justify-center gap-3 px-8 py-16 text-center">
             <div className="flex size-10 items-center justify-center rounded-full bg-secondary">
               <MessageSquareDashed className="size-5 text-muted-foreground" />

@@ -105,18 +105,29 @@ export function TopBar({
           </TooltipTrigger>
           <TooltipContent>Notifications</TooltipContent>
         </Tooltip>
-        {CLERK_CONFIGURED_CLIENT ? (
-          <UserButton />
-        ) : (
-          <Avatar size="sm">
-            <AvatarFallback>
-              {DEV_USER.name
-                .split(" ")
-                .map((part) => part[0])
-                .join("")}
-            </AvatarFallback>
-          </Avatar>
-        )}
+        {/* Fixed-size slot, NOT a bare <UserButton />. Clerk renders that
+            control from its own client bundle, so it occupies zero width
+            until that bundle loads and mounts — in a flex row, popping from
+            0 to ~28px shoves every sibling to its left sideways, which is
+            the visible topbar jolt on every page load. Reserving the box up
+            front means the avatar fades into space already allocated for it.
+            size-7 matches Clerk's default avatar; the DEV_USER fallback is
+            size-6 and centers inside the same slot, so both branches occupy
+            identical space. */}
+        <div className="flex size-7 shrink-0 items-center justify-center">
+          {CLERK_CONFIGURED_CLIENT ? (
+            <UserButton />
+          ) : (
+            <Avatar size="sm">
+              <AvatarFallback>
+                {DEV_USER.name
+                  .split(" ")
+                  .map((part) => part[0])
+                  .join("")}
+              </AvatarFallback>
+            </Avatar>
+          )}
+        </div>
       </div>
     </header>
   );

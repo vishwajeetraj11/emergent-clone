@@ -2,6 +2,81 @@
 
 Notable changes to the Emergent clone. Newest first.
 
+## 2026-07-22 — Move the builder to `/dashboard`, make `/` the landing page for everyone
+
+**Before.** `/` meant two different things depending on who was looking:
+`AppShell` for signed-in visitors, `LandingPage` for signed-out ones. A link
+to the product's front door showed an existing user their own dashboard
+instead of the pitch, and there was no stable URL for the marketing page.
+
+**Now.** `/` is the landing page for everyone; the builder lives at
+`/dashboard` (`src/app/dashboard/page.tsx`, which sends signed-out visitors
+to `/sign-in` rather than rendering a shell whose every API call would 404 on
+ownership). Since signed-in visitors now see the landing page too, its header
+swaps "Sign in / Get started" for "Go to dashboard" via Clerk's
+`<Show when="signed-in">` — this Clerk major replaced the old
+`SignedIn`/`SignedOut` components with it. `AppShell`'s Home button points at
+`/dashboard`, since "home" there means the builder's empty state, not the
+marketing page.
+
+Post-auth redirects are set as `signInFallbackRedirectUrl` /
+`signUpFallbackRedirectUrl` props on `<ClerkProvider>` (`ClerkGate`) so the
+routing lives in version control next to the routes it names. They take
+precedence over `NEXT_PUBLIC_CLERK_SIGN_{IN,UP}_FALLBACK_REDIRECT_URL`, which
+should be updated to `/dashboard` in every environment for consistency.
+
+**Unconfigured (dev, default) is unchanged in spirit:** with no Clerk keys
+there is no sign-in flow behind the landing page's CTAs, so every button on
+it would dead-end. That mode redirects `/` straight to `/dashboard`,
+preserving the single-user experience the root route had.
+
+## 2026-07-22 — Give the three slowest fetches an actual loading state
+
+**Bug.** Projects, credits, and session history each take seconds, and none
+of them said so — every one modelled its data as `T | null`, a two-state
+model for a four-state problem, so "loading" was indistinguishable from
+"empty" or "failed":
+
+- `ProjectsList` returned `null` for both `projects === null` (still
+  fetching) and `[]` (genuinely none), so the list was blank space for ~2s
+  and a brand-new user couldn't tell loading from "you have nothing yet".
+- `CreditsPill` rendered the literal text **"Buy Credits"** until the
+  balance arrived — not a loading state but a confidently wrong one, on
+  screen for the whole fetch, then replaced by "704 credits".
+- `ChatPanel` showed **"No activity yet"** while a session's history was
+  still in flight, which is a false statement about a session that may have
+  a long history. `useAgentSession` already tracked `isLoadingProject`;
+  `AppShell` simply never passed it down.
+
+**Fix.** Skeleton rows for the project list (empty still renders nothing, so
+the onboarding carousel isn't displaced); a pulsing placeholder in the
+credits pill; skeleton timeline entries while a project loads, with
+`isLoadingProject` wired through `AppShell` to `ChatPanel`. Loading and
+empty are now distinct states everywhere.
+
+Only the *first* balance load counts as loading — `useCredits` refetches on
+every `jobStatus` change, and flashing a placeholder over a balance already
+on screen would flicker for no reason.
+
+**Follow-up: the placeholders themselves had to stop shifting the layout.**
+A skeleton that isn't the size of what replaces it just moves the jank
+rather than removing it. Three fixes:
+
+- `<UserButton />` renders from Clerk's own client bundle, so it occupies
+  zero width until that bundle mounts — in the topbar's flex row, popping
+  from 0 to ~28px shoved every sibling sideways on every page load. It now
+  sits in a fixed `size-7` slot, as does the DEV_USER fallback.
+- The project-list skeleton was a hardcoded 3 rows resolving into 6, growing
+  the block ~114px. Because `PreviewPanel` centers that column
+  (`justify-center`), the growth also dragged the onboarding carousel above
+  it upward. It now renders `SKELETON_ROWS = 6` — the container's own
+  `max-h-64` cap, past which the list scrolls — so the placeholder can only
+  shrink, never jump.
+- The credits placeholder is `w-[68px]` (the loaded pill measures 88px with
+  20px of padding, so the pill is now identical in both states) and
+  `rounded-full` rather than `rounded-sm`, since a sharp-cornered bar inside
+  a 28px-tall pill with a 12px radius read as the shape changing on load.
+
 ## 2026-07-22 — Stop doing a Clerk fetch and two DB writes on every authenticated read
 
 **Bug.** `getCurrentUser` (`src/lib/auth.ts`) runs on every authenticated

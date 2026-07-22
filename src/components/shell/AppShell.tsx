@@ -33,7 +33,11 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
   }
 
   function handleNavigateHome() {
-    router.push("/");
+    // /dashboard, not / — "home" here means the builder's own empty state
+    // (onboarding carousel + project list), and `/` is the marketing landing
+    // page now. Sending someone here from inside the app would bounce them
+    // out of the product.
+    router.push("/dashboard");
   }
 
   return (
@@ -50,6 +54,7 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
           events={session.events}
           jobStatus={session.jobStatus}
           isStarting={session.isStarting}
+          isLoadingProject={session.isLoadingProject}
           error={session.error}
           hasProject={Boolean(session.project)}
           sessionId={session.sessionId}

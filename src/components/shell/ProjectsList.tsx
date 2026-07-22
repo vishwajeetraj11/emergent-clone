@@ -5,6 +5,14 @@ import { Trash2 } from "lucide-react";
 import { fetchJson } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 
+/**
+ * Skeleton rows shown while the list loads. Six because the list container
+ * caps at max-h-64 (256px) and scrolls past that, so six rows is the tallest
+ * this block ever gets — the placeholder can't overshoot the real thing, and
+ * anyone at or above the cap sees no size change at all when it resolves.
+ */
+const SKELETON_ROWS = 6;
+
 interface ProjectListItem {
   id: string;
   name: string;
@@ -75,7 +83,40 @@ export function ProjectsList({
     }
   }
 
-  if (!projects || projects.length === 0) return null;
+  // `null` (still fetching) and `[]` (genuinely no projects) are NOT the same
+  // state and must not render the same way. They used to both return null, so
+  // GET /api/projects' latency showed as blank space and a brand-new user
+  // couldn't tell "loading" from "you have nothing yet". Skeleton rows while
+  // loading; still nothing at all when the list is truly empty, so the
+  // onboarding carousel isn't displaced for a genuinely new user.
+  //
+  // Skeleton height matters as much as its existence: this block sits in a
+  // justify-center column (see PreviewPanel), so a placeholder shorter than
+  // the list replacing it grows the block AND drags the onboarding carousel
+  // above it upward. Hence SKELETON_ROWS is the container's cap, not a small
+  // guess — the placeholder can only ever shrink, never jump.
+  if (projects === null) {
+    return (
+      <div className="mt-10 w-full max-w-md" aria-busy="true">
+        <h3 className="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Your projects
+        </h3>
+        <div className="flex flex-col gap-1.5">
+          {Array.from({ length: SKELETON_ROWS }, (_, i) => (
+            <div
+              key={i}
+              className="h-[38px] animate-pulse rounded-md border border-border bg-secondary/30"
+            />
+          ))}
+        </div>
+        <span className="sr-only" role="status">
+          Loading your projects…
+        </span>
+      </div>
+    );
+  }
+
+  if (projects.length === 0) return null;
 
   return (
     <div className="mt-10 w-full max-w-md">

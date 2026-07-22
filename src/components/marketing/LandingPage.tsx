@@ -1,11 +1,21 @@
 import Link from "next/link";
+import { Show } from "@clerk/nextjs";
 import { ArrowUp, Rocket, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 /**
- * Shown at `/` instead of AppShell whenever Clerk is configured and the
- * visitor has no session — see src/app/page.tsx. Unconfigured (dev/no
- * Clerk) keeps going straight to AppShell, unchanged.
+ * Shown at `/` whenever Clerk is configured — for every visitor, signed in
+ * or not (see src/app/page.tsx). Unconfigured (dev/no Clerk) redirects to
+ * /dashboard instead, since none of the CTAs below have a sign-in flow
+ * behind them in that mode.
+ *
+ * Because signed-in visitors see this page too, the header can't
+ * unconditionally offer "Sign in" / "Get started" — that would dead-end
+ * someone who already has an account and just wants back into the app.
+ * Clerk's <Show when="signed-in|signed-out"> resolves that server-side from
+ * auth() (this Clerk major replaced the old SignedIn/SignedOut components
+ * with it), so this stays a server component and no auth check is duplicated
+ * here.
  */
 export function LandingPage() {
   return (
@@ -16,17 +26,24 @@ export function LandingPage() {
           Emergent Clone
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            render={<Link href="/sign-in" />}
-            nativeButton={false}
-            variant="ghost"
-            size="sm"
-          >
-            Sign in
-          </Button>
-          <Button render={<Link href="/sign-up" />} nativeButton={false} size="sm">
-            Get started
-          </Button>
+          <Show when="signed-out">
+            <Button
+              render={<Link href="/sign-in" />}
+              nativeButton={false}
+              variant="ghost"
+              size="sm"
+            >
+              Sign in
+            </Button>
+            <Button render={<Link href="/sign-up" />} nativeButton={false} size="sm">
+              Get started
+            </Button>
+          </Show>
+          <Show when="signed-in">
+            <Button render={<Link href="/dashboard" />} nativeButton={false} size="sm">
+              Go to dashboard
+            </Button>
+          </Show>
         </div>
       </header>
 
