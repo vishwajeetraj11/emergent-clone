@@ -1,16 +1,22 @@
-import { readFileSync, readdirSync } from "node:fs";
-import path from "node:path";
 import { Sandbox } from "@vercel/sandbox";
 import { getSessionFiles } from "@/server/files";
 import { ensureSessionDatabase } from "@/server/project-db";
 import {
-  TEMPLATE_DIR,
   type SandboxProvider,
   type SandboxStartOptions,
   type SandboxStartResult,
   type SandboxStatus,
   type SnapshotFile,
 } from "@/server/sandbox";
+import {
+  APP_PORT,
+  SANDBOX_TIMEOUT_MS,
+  SNAPSHOT_EXPIRATION_MS,
+  resolveCredentials,
+} from "@/server/sandbox-vercel-config";
+import { probeUrl, waitForUrlReady } from "@/server/sandbox-vercel-net";
+import { registry, startingPromises } from "@/server/sandbox-vercel-registry";
+import { readTemplateFilesRecursive } from "@/server/sandbox-vercel-template";
 
 // ---------------------------------------------------------------------------
 // VercelSandboxProvider: runs the generated app's `npm install` + dev server
@@ -32,22 +38,6 @@ import {
 // or reattach by anymore, `name: sessionId` IS the durable identity, unique
 // per Vercel project.
 //
-// LIFECYCLE: a sandbox is stopped eagerly rather than left to bill until it
-// times out — /api/sessions/[id]/stop-preview fires on navigate-away/
-// tab-close (see useAgentSession's pagehide wiring), and agent.ts's
-// runBuildPhase failure paths call stop() too. v2's stop() snapshots the
-// filesystem (persistent: true); the next getOrCreate resumes that snapshot
-// in seconds — a VM boot and re-running the dev server, NOT a from-scratch
-// npm install (node_modules is already on disk). `timeout`
-// (SANDBOX_TIMEOUT_MS, still 45 minutes) is a per-SESSION window, not a
-// cumulative one: every resume starts a fresh clock. Snapshot storage is
-// bounded so an abandoned project doesn't bill forever: keepLastSnapshots
-// {count: 1} plus SNAPSHOT_EXPIRATION_MS (7 days) — past that window
-// getOrCreate's name lookup finds the snapshot already gone and creates
-// fresh instead of resuming, and this provider's own file seeding (the
-// `files` table snapshot) rebuilds it from there, same shape as a stale v1
-// sandbox rebuilding from scratch.
-//
 // COST (Hobby free allotment, as documented for @vercel/sandbox): 5
 // Active-CPU hr/mo, 420 GB-hr memory/mo, 5,000 creations/mo, 10 concurrent
 // sandboxes. Active-CPU billing ignores idle/I/O-wait time, and eager
@@ -63,173 +53,6 @@ import {
 // concern — it authenticates the API calls THIS process makes to create/
 // manage the sandbox, it is never injected into the VM itself.
 // ---------------------------------------------------------------------------
-
-export function isVercelSandboxConfigured(): boolean {
-  return Boolean(
-    process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID
-  );
-}
-
-/**
- * The sandbox's `timeout` bounds each session's lifetime — see the module
- * doc comment above on why that's a per-session window now (every
- * getOrCreate resume starts a fresh clock) rather than a one-shot,
- * disappears-forever TTL. Still 45 minutes, the Hobby-plan maximum, and NOT
- * lower on purpose: the first real run with a 15-minute timeout had the
- * sandbox expire *mid-build* (the build agent's own local npm-install/build
- * sanity check can easily take 10+ minutes on a slow network), so the
- * end-of-build syncFiles push landed on a dead VM and the preview 410'd
- * until the next restore. An idle sandbox bills almost zero Active CPU —
- * the cost of the longer window is just provisioned-memory GB-hours, well
- * inside the free allotment.
- */
-const SANDBOX_TIMEOUT_MS = 45 * 60_000;
-
-/**
- * Bounds how long a stopped sandbox's filesystem snapshot is retained,
- * paired with `keepLastSnapshots: { count: 1 }` on every getOrCreate call
- * (see bootSandbox) to cap billed snapshot storage — see this file's module
- * doc comment's LIFECYCLE paragraph. A session untouched for longer than
- * this doesn't resume at all: getOrCreate's name lookup finds the snapshot
- * already expired, deletes it, and creates fresh instead — this provider's
- * own file seeding (the `files` table snapshot) rebuilds it from there,
- * same shape as any other fresh create.
- */
-const SNAPSHOT_EXPIRATION_MS = 7 * 24 * 60 * 60_000;
-
-/** The one port the generated app's dev server listens on, both at `Sandbox.getOrCreate({ ports })` time and every later `sandbox.domain(3000)` call. */
-const APP_PORT = 3000;
-
-interface VercelCredentials {
-  token: string;
-  projectId: string;
-  teamId: string;
-}
-
-/**
- * Reads the three auth env vars this provider needs. Throws rather than
- * returning `undefined`-shaped fields — this should be unreachable in
- * practice, since src/server/sandbox.ts's factory only ever constructs a
- * VercelSandboxProvider once isVercelSandboxConfigured() has already
- * confirmed all three are set, but a throw here is a much louder failure
- * mode than silently sending "undefined" to the Vercel API if that
- * invariant is ever violated (e.g. a future call site constructing this
- * class directly).
- */
-function resolveCredentials(): VercelCredentials {
-  const token = process.env.VERCEL_TOKEN;
-  const teamId = process.env.VERCEL_TEAM_ID;
-  const projectId = process.env.VERCEL_PROJECT_ID;
-  if (!token || !teamId || !projectId) {
-    throw new Error(
-      "VercelSandboxProvider used without VERCEL_TOKEN/VERCEL_TEAM_ID/VERCEL_PROJECT_ID " +
-        "all configured — this should be unreachable (see isVercelSandboxConfigured)."
-    );
-  }
-  return { token, teamId, projectId };
-}
-
-// ---------------------------------------------------------------------------
-// URL readiness probing — the remote-sandbox analog of src/server/sandbox.ts's
-// pollUntilReady, just fetching a public https:// domain instead of
-// 127.0.0.1:<port>.
-// ---------------------------------------------------------------------------
-
-/**
- * Single bounded fetch attempt. Deliberately checks `res.ok` (2xx) only, the
- * same bar src/server/sandbox.ts's pollUntilReady/waitForServerReady use —
- * NOT "any response" — because the sandbox's public domain is served
- * through a Vercel-operated edge proxy: before the dev server inside the VM
- * is actually listening on port 3000, that proxy can itself answer with a
- * 502/503/504 (a real HTTP response, not a connection failure). Accepting
- * "any response below 500" would risk nothing here since a proxy error IS
- * >=500, but accepting >=500 too would risk mistaking "no upstream yet" for
- * "app is up" — so this stays strictly 2xx, matching local's own bar.
- */
-async function probeUrl(url: string, timeoutMs: number): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    return res.ok;
-  } catch {
-    return false; // connection refused, DNS not ready yet, timed out, ...
-  }
-}
-
-/** Loops probeUrl until `deadlineMs` elapses — used only while waiting for a freshly-started dev server to come up for the first time. */
-async function waitForUrlReady(url: string, deadlineMs: number): Promise<boolean> {
-  const deadline = Date.now() + deadlineMs;
-  while (Date.now() < deadline) {
-    if (await probeUrl(url, 2000)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Template reading
-//
-// Mirrors src/server/files.ts's `walk` almost exactly, but reading straight
-// off local disk into memory (for writeFiles) rather than snapshotting a
-// directory into the `files` table — this provider has no on-disk sandbox
-// directory of its own to snapshot from. Scoped to just this file rather
-// than shared with files.ts/sandbox.ts, since it's small and the exclusion
-// list only needs to match what actually exists under TEMPLATE_DIR.
-// ---------------------------------------------------------------------------
-
-const TEMPLATE_EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next"]);
-
-function readTemplateFilesRecursive(): SnapshotFile[] {
-  const out: SnapshotFile[] = [];
-
-  function walk(dir: string): void {
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (TEMPLATE_EXCLUDED_DIRS.has(entry.name)) continue;
-        walk(fullPath);
-      } else if (entry.isFile()) {
-        out.push({
-          path: path.relative(TEMPLATE_DIR, fullPath),
-          content: readFileSync(fullPath, "utf8"),
-        });
-      }
-    }
-  }
-
-  walk(TEMPLATE_DIR);
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Registry — mirrors src/server/sandbox.ts's `registry`/`startingPromises`
-// pattern (see that file's RegistryEntry doc comment): in-process, in-memory
-// only, so it does not survive a dev-server restart. The difference from
-// local: an entry surviving in memory is a *cache*, never the source of
-// truth for "is this sandbox still alive" — every read through it gets
-// re-probed (see probeRegistryEntry) because, unlike a ChildProcess handle,
-// there's no free/synchronous "is it still running" check for a remote VM.
-// ---------------------------------------------------------------------------
-
-interface VercelRegistryEntry {
-  sandbox: Sandbox | null;
-  url: string;
-  state: SandboxStatus["state"];
-  message?: string;
-}
-
-const registry = new Map<string, VercelRegistryEntry>();
-
-/** Guards concurrent create-or-reattach calls for the same session — same purpose as sandbox.ts's startingPromises. */
-const startingPromises = new Map<string, Promise<SandboxStartResult>>();
 
 export class VercelSandboxProvider implements SandboxProvider {
   async start(sessionId: string, options?: SandboxStartOptions): Promise<SandboxStartResult> {

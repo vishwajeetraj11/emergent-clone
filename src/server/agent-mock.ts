@@ -2,7 +2,7 @@ import { appendEvent, getAllEvents } from "@/server/events";
 import { setJobStatus } from "@/server/jobs";
 import { WHIMSICAL_STATUS_LINES } from "@/server/agent-prompts";
 import { countUnansweredQuestions } from "@/server/agent-interaction";
-import { isStopped, sleep } from "@/server/agent";
+import { isStopped, sleep } from "@/server/agent-core";
 import type { Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------

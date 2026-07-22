@@ -2,6 +2,44 @@
 
 Notable changes to the Emergent clone. Newest first.
 
+## 2026-07-22 — Defer the preview sandbox stop instead of firing it on every `pagehide`
+
+**Bug.** `pagehide` fires identically on a real tab-close and on a plain page
+refresh — the event carries nothing that distinguishes them. The client's
+teardown beacon therefore stopped the sandbox VM on every refresh, and the
+refresh's own follow-up load immediately cold-resumed it. Measured on one
+refresh of a project page: `stop-preview` 200 in 9.5s, then `restore` 200 in
+20.3s. ~30s of dead time, on the single most common interaction in the app.
+
+**Fix.** `/api/sessions/[id]/stop-preview` no longer stops anything itself.
+It schedules the stop 180s out via a new `src/server/preview-stop-scheduler.ts`
+(module-level `Map<sessionId, Timeout>`, same in-process-state pattern as the
+sandbox registry and job state) and returns immediately. Anything that proves
+the session is still being watched cancels the pending timer: `/restore`, every
+`/preview-health` poll, and `runBuildPhase` right before it starts a sandbox of
+its own. Since an open tab polls health every 45s — well inside the 180s
+window — the timer can only ever reach zero when nothing is actually watching.
+
+**Verified.** A refresh now costs `restore` 6.8s/8.8s with no VM stop at all
+(the sandbox is simply still running, so restore takes its adopt-already-
+serving path). `stop-preview` returns in 3.2s, and that remainder is the
+`assertSessionOwnership` DB round trip, not sandbox work. The timer still
+fires when genuinely abandoned: with no tab polling, the VM reported
+`running` through 170s and `stopped` at 191s.
+
+**Not changed.** The agent failure paths in `agent-phases.ts` still call
+`sandboxProvider.stop()` directly and immediately — teardown after a failed
+build must not be deferred. The client is unchanged apart from a doc comment;
+it still fires the same beacon at the same moment, only the server's response
+to it differs.
+
+**Cost.** A genuinely closed tab now bills up to 3 extra idle minutes. If the
+main server restarts with a timer pending, the timer is lost and the VM idles
+until `SANDBOX_TIMEOUT_MS` (45 min) — the pre-existing backstop under the
+Vercel provider, not a new failure mode. Note that backstop is Vercel-only:
+the local provider has no timeout mechanism, so a lost timer there leaves the
+detached dev-server child running.
+
 ## 2026-07-21 — Free local testing: Claude CLI runtime behind `AGENT_RUNTIME=claude-cli`
 
 **Problem.** The model-picker rewrite replaced the Claude Agent SDK runtime —

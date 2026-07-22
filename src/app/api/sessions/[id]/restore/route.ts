@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { assertSessionOwnership } from "@/lib/authz";
 import { getSessionFiles } from "@/server/files";
 import { sandboxProvider } from "@/server/sandbox";
+import { cancelScheduledStop } from "@/server/preview-stop-scheduler";
 
 /**
  * Phase 3 persistence: brings a session's sandbox back up from its `files`
@@ -33,6 +34,12 @@ export async function POST(
       { status: 404 }
     );
   }
+
+  // A restore is the clearest possible evidence this session is being
+  // watched again — cancel any stop-preview timer a previous tab's pagehide
+  // beacon queued (see preview-stop-scheduler.ts) before it can race this
+  // restore and stop the very sandbox we're about to bring/keep up.
+  cancelScheduledStop(sessionId);
 
   try {
     const { url } = await sandboxProvider.restoreFromSnapshot(sessionId, files);
