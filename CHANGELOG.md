@@ -2,6 +2,34 @@
 
 Notable changes to the Emergent clone. Newest first.
 
+## 2026-07-22 — Give the three slowest fetches an actual loading state
+
+**Bug.** Projects, credits, and session history each take seconds, and none
+of them said so — every one modelled its data as `T | null`, a two-state
+model for a four-state problem, so "loading" was indistinguishable from
+"empty" or "failed":
+
+- `ProjectsList` returned `null` for both `projects === null` (still
+  fetching) and `[]` (genuinely none), so the list was blank space for ~2s
+  and a brand-new user couldn't tell loading from "you have nothing yet".
+- `CreditsPill` rendered the literal text **"Buy Credits"** until the
+  balance arrived — not a loading state but a confidently wrong one, on
+  screen for the whole fetch, then replaced by "704 credits".
+- `ChatPanel` showed **"No activity yet"** while a session's history was
+  still in flight, which is a false statement about a session that may have
+  a long history. `useAgentSession` already tracked `isLoadingProject`;
+  `AppShell` simply never passed it down.
+
+**Fix.** Skeleton rows for the project list (empty still renders nothing, so
+the onboarding carousel isn't displaced); a pulsing placeholder in the
+credits pill; skeleton timeline entries while a project loads, with
+`isLoadingProject` wired through `AppShell` to `ChatPanel`. Loading and
+empty are now distinct states everywhere.
+
+Only the *first* balance load counts as loading — `useCredits` refetches on
+every `jobStatus` change, and flashing a placeholder over a balance already
+on screen would flicker for no reason.
+
 ## 2026-07-22 — Stop doing a Clerk fetch and two DB writes on every authenticated read
 
 **Bug.** `getCurrentUser` (`src/lib/auth.ts`) runs on every authenticated

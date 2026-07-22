@@ -75,7 +75,34 @@ export function ProjectsList({
     }
   }
 
-  if (!projects || projects.length === 0) return null;
+  // `null` (still fetching) and `[]` (genuinely no projects) are NOT the same
+  // state and must not render the same way. They used to both return null, so
+  // GET /api/projects' latency showed as blank space and a brand-new user
+  // couldn't tell "loading" from "you have nothing yet". Skeleton rows while
+  // loading; still nothing at all when the list is truly empty, so the
+  // onboarding carousel isn't displaced for a genuinely new user.
+  if (projects === null) {
+    return (
+      <div className="mt-10 w-full max-w-md" aria-busy="true">
+        <h3 className="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Your projects
+        </h3>
+        <div className="flex flex-col gap-1.5">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="h-[38px] animate-pulse rounded-md border border-border bg-secondary/30"
+            />
+          ))}
+        </div>
+        <span className="sr-only" role="status">
+          Loading your projects…
+        </span>
+      </div>
+    );
+  }
+
+  if (projects.length === 0) return null;
 
   return (
     <div className="mt-10 w-full max-w-md">

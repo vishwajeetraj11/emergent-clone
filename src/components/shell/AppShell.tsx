@@ -50,6 +50,7 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
           events={session.events}
           jobStatus={session.jobStatus}
           isStarting={session.isStarting}
+          isLoadingProject={session.isLoadingProject}
           error={session.error}
           hasProject={Boolean(session.project)}
           sessionId={session.sessionId}

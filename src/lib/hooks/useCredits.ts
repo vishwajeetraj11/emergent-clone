@@ -19,6 +19,15 @@ type BuyStatus = "idle" | "loading" | "not_configured" | "error";
  */
 export function useCredits(jobStatus?: JobStatus | null) {
   const [balance, setBalance] = useState<number | null>(null);
+  /**
+   * True until the very first GET /api/credits settles. Never reset when the
+   * effect below reruns (it refetches on every jobStatus change) — a refetch
+   * should update the number in place, not flash a placeholder over a balance
+   * we already have. That's also why nothing sets this back to true in the
+   * effect body: doing so would be a synchronous setState inside an effect,
+   * which cascades renders (react-hooks/set-state-in-effect).
+   */
+  const [isFirstBalanceLoadPending, setIsFirstBalanceLoadPending] = useState(true);
   const [status, setStatus] = useState<BuyStatus>("idle");
   const [message, setMessage] = useState<string | null>(null);
 
@@ -32,6 +41,9 @@ export function useCredits(jobStatus?: JobStatus | null) {
       })
       .catch(() => {
         // Balance display is best-effort — no DB configured yet, etc.
+      })
+      .finally(() => {
+        if (!cancelled) setIsFirstBalanceLoadPending(false);
       });
     return () => {
       cancelled = true;
@@ -65,5 +77,12 @@ export function useCredits(jobStatus?: JobStatus | null) {
     }
   }
 
-  return { balance, isLoading: status === "loading", status, message, buyCredits };
+  return {
+    balance,
+    isBalanceLoading: isFirstBalanceLoadPending && balance === null,
+    isLoading: status === "loading",
+    status,
+    message,
+    buyCredits,
+  };
 }
