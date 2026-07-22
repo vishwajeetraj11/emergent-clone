@@ -167,13 +167,32 @@ const SIGNUP_BONUS_REASON = "signup_bonus";
  */
 export async function ensureSignupBonus(userId: string): Promise<void> {
   const db = getDb();
+  const idempotencyKey = `signup_bonus:${userId}`;
+
+  // Read before write. GET /api/credits calls this on every poll, and the
+  // grant it guards can only ever happen once per user — so an unconditional
+  // INSERT put a *write* round trip on a read path that exists to display a
+  // balance. Writes can't be served by a read replica, so this capped how far
+  // that endpoint could scale no matter what. The lookup is on a unique index
+  // (see src/db/schema.ts), so the common "already granted" case is one cheap
+  // indexed read.
+  const [granted] = await db
+    .select({ id: creditLedger.id })
+    .from(creditLedger)
+    .where(eq(creditLedger.idempotencyKey, idempotencyKey));
+  if (granted) return;
+
+  // Still an upsert, not a bare insert: two concurrent first-time polls can
+  // both miss the select above, and onConflictDoNothing turns the loser into
+  // a no-op instead of a unique-violation crash — the same race this function
+  // was already written to survive.
   await db
     .insert(creditLedger)
     .values({
       userId,
       delta: SIGNUP_BONUS_CREDITS,
       reason: SIGNUP_BONUS_REASON,
-      idempotencyKey: `signup_bonus:${userId}`,
+      idempotencyKey,
     })
     .onConflictDoNothing({ target: creditLedger.idempotencyKey });
 }

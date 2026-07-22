@@ -21,7 +21,8 @@ const MAX_SLUG_ATTEMPTS = 5;
  * Single-user dev mode (Phase 0-2, see src/lib/dev-user.ts): make sure the
  * fixed dev user row exists before we FK anything to it. Idempotent — safe
  * to call on every request. Phase 3: only runs when Clerk isn't configured;
- * when it is, getCurrentUser() below already upserts the real user's row.
+ * when it is, getCurrentUser() below already provisions the real user's row
+ * (just-in-time, on that user's first authenticated request).
  */
 async function ensureDevUser() {
   const db = getDb();
@@ -48,9 +49,10 @@ export async function createProjectAndJob(prompt: string, model?: string, apiKey
 
   // Phase 3: isClerkConfigured() gates which user this project is owned by.
   // Unconfigured (default, always-tested): ensureDevUser + DEV_USER.id,
-  // unchanged from Phase 0-2. Configured: getCurrentUser() resolves (and
-  // upserts) the real signed-in Clerk user's row instead — unverified, no
-  // real keys in this environment.
+  // unchanged from Phase 0-2. Configured: getCurrentUser() resolves the real
+  // signed-in Clerk user's row instead, provisioning it if this is their very
+  // first authenticated request — unverified, no real keys in this
+  // environment.
   let owner: { id: string };
   if (isClerkConfigured()) {
     owner = await getCurrentUser();

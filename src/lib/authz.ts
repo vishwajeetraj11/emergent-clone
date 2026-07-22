@@ -83,8 +83,14 @@ async function assertOwnership(
 ): Promise<void> {
   if (!isClerkConfigured()) return;
 
-  const currentUser = await getCurrentUser();
-  const ownerUserId = await getOwnerUserId();
+  // Independent lookups — getOwnerUserId() queries by resource id and never
+  // consults the current user — so they run concurrently rather than paying
+  // two serialized round trips to a remote DB. Promise.all rejects on the
+  // first failure, same as the sequential awaits did.
+  const [currentUser, ownerUserId] = await Promise.all([
+    getCurrentUser(),
+    getOwnerUserId(),
+  ]);
   if (!ownershipMatches(ownerUserId, currentUser.id)) {
     throw new ForbiddenError();
   }

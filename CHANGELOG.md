@@ -2,6 +2,49 @@
 
 Notable changes to the Emergent clone. Newest first.
 
+## 2026-07-22 — Stop doing a Clerk fetch and two DB writes on every authenticated read
+
+**Bug.** `getCurrentUser` (`src/lib/auth.ts`) runs on every authenticated
+request — 34 API call sites reach it via `authz.ts`'s `assert*Ownership`,
+which needs "who am I" before it can compare against a resource's owner. It
+did a Clerk Backend API fetch (`currentUser()`) *and* a DB write
+(`insert ... onConflictDoUpdate ... returning`) every single time. Both exist
+only to provision a `users` row that, per user, is needed exactly once —
+Clerk owns identity but `projects.userId` foreign-keys to this app's own
+`users.id`, so a mapping row has to exist, and no Clerk webhook exists to
+create it. `GET /api/credits` added a third: `ensureSignupBonus` wrote a
+ledger row on every poll of a *balance*.
+
+Against a remote Neon instance those were the whole cost — the observed
+2.8-7.1s on `/api/projects` and 5.5-9.6s on `/api/projects/[id]` were a
+serialized round-trip count, not query cost.
+
+**Fix.** Read before write, on all three. `getCurrentUser` now resolves
+`userId` from `auth()` (in-process, no round trip) and looks the row up by
+`users.clerkUserId` (unique-indexed) — one cheap read on the common path,
+with the Clerk fetch and the upsert moved to a cold branch that only runs on
+a user's genuinely-first authenticated request. Same for
+`ensureSignupBonus`. Both keep `onConflict*` on the cold path, since two
+concurrent first requests can still race the lookup. `getCurrentUser` is
+wrapped in React `cache()` so `/api/projects/[id]`, which resolves the user
+twice (ownership check + handler), now does it once. `assertOwnership`'s two
+independent lookups run under `Promise.all` instead of back to back.
+
+**Measured** (warm): `/api/projects` 2.8-7.1s → 1.9s, `/api/credits`
+3.2-7.5s → 2.8s. `/api/projects/[id]` is essentially unchanged at 7.6s —
+auth was never its main cost; it issues several sequential queries of its
+own, which is now the dominant remaining cost there.
+
+**Tradeoff.** `email`/`name` no longer re-sync from Clerk on every request,
+so a profile edited in Clerk won't reach this table until a `user.updated`
+webhook exists (`src/app/api/webhooks/` has only `stripe`). Safe today:
+those columns feed ownership and Stripe receipts, and the UI renders Clerk's
+own `<UserButton>`, which reads from Clerk directly.
+
+**Not verified.** The cold path — provisioning a brand-new Clerk user's row
+— needs a never-before-seen login to exercise. Same caveat this file already
+carried for the whole configured branch.
+
 ## 2026-07-22 — Defer the preview sandbox stop instead of firing it on every `pagehide`
 
 **Bug.** `pagehide` fires identically on a real tab-close and on a plain page
