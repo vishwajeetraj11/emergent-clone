@@ -60,10 +60,9 @@ import { getJobApiKeys, clearJobApiKeys } from "@/server/user-keys";
 // already distinguishes fresh builds from continuations). Either way, once
 // a build happens, the new Review(+Debug) tail always runs.
 //
-// REAL RUNTIME: the "real" (non-mock) path runs on the Claude Agent SDK
-// (`@anthropic-ai/claude-agent-sdk`), which wraps the local `claude` CLI and
-// authenticates with whatever the CLI is already logged in as (Claude Code
-// subscription auth) — no ANTHROPIC_API_KEY needed for local dev.
+// REAL RUNTIME: the "real" (non-mock) path runs on the Vercel AI SDK
+// (src/server/llm.ts) with a metered provider key; the agent's file/shell
+// tools execute inside the session's Vercel sandbox (src/server/agent-tools.ts).
 //
 // The `ask_user` tool is a custom in-process SDK MCP tool: when the model
 // calls it, the handler appends the tool_call + question events, flips the

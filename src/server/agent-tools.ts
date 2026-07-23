@@ -253,10 +253,8 @@ export interface AskUserDeps {
  */
 /**
  * Raw shape (not wrapped in `z.object`) for ask_user's input — exported so
- * the Claude CLI runtime backend (src/server/llm-claude-cli.ts) can register
- * the exact same validation on its own bridged MCP tool, whose `tool()`
- * (from @anthropic-ai/claude-agent-sdk) wants a bare shape rather than a
- * `ZodObject`. Both runtimes parse identical input as a result.
+ * callers can reuse the exact validation where a bare shape is wanted rather
+ * than a `ZodObject`.
  */
 export const askUserInputShape = {
   questions: z
