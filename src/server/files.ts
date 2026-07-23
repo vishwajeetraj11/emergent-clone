@@ -1,13 +1,28 @@
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
 import { files } from "@/db/schema";
+import {
+  deleteObjects,
+  getTextObject,
+  isR2Configured,
+  putTextObject,
+  sessionFileKey,
+} from "@/server/r2";
 
 // ---------------------------------------------------------------------------
 // Directory snapshot -> `files` table upsert, used by the Phase 2 build
 // phase (src/server/agent.ts) after the build query() completes, and read
 // back by GET /api/sessions/[id]/files for the timeline's file viewer.
+//
+// "R2 = bytes, DB = index" (see src/server/r2.ts + the files-table comment in
+// src/db/schema.ts): when R2 is configured, a changed file's bytes go to R2
+// and its row carries only {hash}; when R2 is unconfigured the bytes go in the
+// `content` column exactly as before. getSessionFiles hydrates both shapes
+// back into the unchanged SessionFile { path, content, updatedAt } contract,
+// so none of its consumers change.
 // ---------------------------------------------------------------------------
 
 const EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next", ".turbo"]);
@@ -19,9 +34,10 @@ const EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next", ".turbo"]);
 // carry a live connection string.
 const EXCLUDED_FILES = new Set([".env", ".env.local"]);
 
-// Best-effort binary skip list, in addition to the excluded dirs above — the
-// files table stores `content` as text, so we don't want to jam raw binary
-// bytes (mangled by the utf8 decode) into it.
+// Best-effort binary skip list, in addition to the excluded dirs above — file
+// content is stored/transferred as text (DB text column or R2 utf-8 object),
+// so we don't want to jam raw binary bytes (mangled by the utf8 decode) into
+// it.
 const BINARY_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -40,6 +56,10 @@ const BINARY_EXTENSIONS = new Set([
 // Skip anything bigger than this per file — defense against accidentally
 // snapshotting something huge (e.g. a stray lockfile-like artifact).
 const MAX_FILE_BYTES = 512 * 1024;
+
+// Bounded fan-out for R2 PUT/GET/COPY — enough to hide per-object latency
+// without opening a socket per file on a large project.
+const IO_CONCURRENCY = 8;
 
 function walk(dir: string, baseDir: string, out: string[]): void {
   let entries: import("node:fs").Dirent[];
@@ -66,12 +86,32 @@ export interface SessionFile {
   updatedAt: Date;
 }
 
+function sha256hex(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 /**
  * Snapshots `dir` recursively (excluding node_modules/.git/.next/.turbo) and
  * upserts every changed file into the `files` table, keyed by
- * (session_id, path) — the schema's existing unique index makes this a
- * plain upsert. Only rows whose content actually changed are written.
- * Returns the list of changed relative paths.
+ * (session_id, path). Diff is by sha256 for R2-backed rows, string-compare for
+ * legacy rows. When R2 is configured, changed bytes are PUT to R2 first and
+ * the row stores only {hash}; otherwise the row stores {content} as before.
+ * Files that have vanished from disk since the last snapshot have their rows
+ * (and R2 objects) deleted. Returns the list of changed relative paths that
+ * were WRITTEN — vanished paths are NOT included (callers, e.g.
+ * syncChangedFilesToSandbox, re-read every returned path from disk, so a
+ * deleted path in the return value would ENOENT).
+ *
+ * NB every caller (src/server/agent-phases.ts) passes the FULL sandbox dir, so
+ * the vanished-set is always computed against a complete tree — restore/fork
+ * never snapshot, so they can't trigger a spurious wipe. One consequence:
+ * restore no longer resurrects files the agent deleted in a later pass.
  */
 export async function snapshotSessionFiles(
   sessionId: string,
@@ -79,17 +119,21 @@ export async function snapshotSessionFiles(
 ): Promise<string[]> {
   if (!existsSync(dir)) return [];
   const db = getDb();
+  const r2 = isR2Configured();
 
   const relPaths: string[] = [];
   walk(dir, dir, relPaths);
 
   const existing = await db
-    .select({ path: files.path, content: files.content })
+    .select({ path: files.path, content: files.content, hash: files.hash })
     .from(files)
     .where(eq(files.sessionId, sessionId));
-  const existingByPath = new Map(existing.map((f) => [f.path, f.content]));
+  const existingByPath = new Map(existing.map((f) => [f.path, f]));
 
-  const changed: string[] = [];
+  // Gather the files whose content actually changed (read + hash), skipping
+  // unreadable/oversized ones. Do this before any writes so the write fan-out
+  // below is a clean chunked pass.
+  const toWrite: { relPath: string; content: string; hash: string }[] = [];
   for (const relPath of relPaths) {
     const fullPath = path.join(dir, relPath);
     let content: string;
@@ -103,27 +147,126 @@ export async function snapshotSessionFiles(
       continue;
     }
 
-    if (existingByPath.get(relPath) === content) continue;
+    const hash = sha256hex(content);
+    const row = existingByPath.get(relPath);
+    if (row) {
+      // R2-backed rows compare by hash; legacy rows fall back to content.
+      if (row.hash != null ? row.hash === hash : row.content === content) continue;
+    }
+    toWrite.push({ relPath, content, hash });
+  }
 
-    await db
-      .insert(files)
-      .values({ sessionId, path: relPath, content })
-      .onConflictDoUpdate({
-        target: [files.sessionId, files.path],
-        set: { content, updatedAt: new Date() },
-      });
-    changed.push(relPath);
+  const changed: string[] = [];
+  for (const group of chunk(toWrite, IO_CONCURRENCY)) {
+    await Promise.all(
+      group.map(async ({ relPath, content, hash }) => {
+        if (r2) {
+          // PUT the bytes before claiming the row is R2-backed, so a row never
+          // points at an object that doesn't exist.
+          await putTextObject(sessionFileKey(sessionId, relPath), content);
+          await db
+            .insert(files)
+            .values({ sessionId, path: relPath, content: null, hash })
+            .onConflictDoUpdate({
+              target: [files.sessionId, files.path],
+              set: { content: null, hash, updatedAt: new Date() },
+            });
+        } else {
+          await db
+            .insert(files)
+            .values({ sessionId, path: relPath, content, hash: null })
+            .onConflictDoUpdate({
+              target: [files.sessionId, files.path],
+              set: { content, hash: null, updatedAt: new Date() },
+            });
+        }
+      })
+    );
+    for (const { relPath } of group) changed.push(relPath);
+  }
+
+  // Vanished-file cleanup: rows whose path is no longer on disk. Guard against
+  // an empty walk (a raced/half-seeded dir) wiping the whole snapshot. Use the
+  // full walk output (not the read-filtered set) so a file that merely grew
+  // past MAX_FILE_BYTES keeps its row.
+  if (relPaths.length > 0) {
+    const onDisk = new Set(relPaths);
+    const vanished = existing.map((f) => f.path).filter((p) => !onDisk.has(p));
+    if (vanished.length > 0) {
+      // Rows first: a leftover R2 object is harmless (project delete's
+      // deletePrefix sweeps it), but a hash-row pointing at a deleted object
+      // would be a lie.
+      await db
+        .delete(files)
+        .where(and(eq(files.sessionId, sessionId), inArray(files.path, vanished)));
+      if (r2) {
+        try {
+          await deleteObjects(vanished.map((p) => sessionFileKey(sessionId, p)));
+        } catch (err) {
+          console.error(`[files] failed to delete vanished R2 objects for ${sessionId}`, err);
+        }
+      }
+    }
   }
 
   return changed;
 }
 
-/** All latest-snapshot files for a session, for the file viewer / GitHub export. */
+/**
+ * All latest-snapshot files for a session, for the file viewer / GitHub export
+ * / Vercel deploy / restore / fork. Legacy rows return their inline content;
+ * R2-backed rows have their bytes hydrated from R2 (bounded concurrency).
+ *
+ * A genuinely-missing R2 object (404) is logged and that one file skipped —
+ * never fails the whole call (all-missing degrades to 0 files, hitting the
+ * caller's existing empty-snapshot path). A transient R2 error (unreachable /
+ * 5xx) is NOT swallowed: it propagates so a deploy/export can't silently ship
+ * a gutted app; every caller has an error path.
+ */
 export async function getSessionFiles(sessionId: string): Promise<SessionFile[]> {
   const db = getDb();
   const rows = await db
-    .select()
+    .select({
+      path: files.path,
+      content: files.content,
+      hash: files.hash,
+      updatedAt: files.updatedAt,
+    })
     .from(files)
     .where(eq(files.sessionId, sessionId));
-  return rows.map((r) => ({ path: r.path, content: r.content, updatedAt: r.updatedAt }));
+
+  const r2 = isR2Configured();
+  const out: (SessionFile | null)[] = new Array(rows.length).fill(null);
+  const r2Indices: number[] = [];
+
+  rows.forEach((r, i) => {
+    if (r.content != null) {
+      out[i] = { path: r.path, content: r.content, updatedAt: r.updatedAt };
+    } else if (r.hash != null) {
+      r2Indices.push(i); // hydrate below
+    }
+    // both null: malformed row (shouldn't happen) — leave skipped.
+  });
+
+  for (const group of chunk(r2Indices, IO_CONCURRENCY)) {
+    await Promise.all(
+      group.map(async (i) => {
+        const r = rows[i];
+        if (!r2) {
+          console.error(
+            `[files] R2-backed row ${sessionId}/${r.path} but R2 is not configured; skipping`
+          );
+          return;
+        }
+        const body = await getTextObject(sessionFileKey(sessionId, r.path));
+        if (body == null) {
+          console.error(`[files] R2 object missing for ${sessionId}/${r.path}; skipping`);
+          return;
+        }
+        out[i] = { path: r.path, content: body, updatedAt: r.updatedAt };
+      })
+    );
+  }
+
+  return out.filter((x): x is SessionFile => x !== null);
 }

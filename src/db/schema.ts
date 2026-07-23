@@ -219,6 +219,17 @@ export const events = pgTable(
 
 // ---------------------------------------------------------------------------
 // files — latest snapshot per session (file viewer + GitHub export)
+//
+// "R2 = bytes, DB = index" (see src/server/r2.ts): a row is the index entry;
+// the bytes may live either inline (`content`) or in R2 (`hash` set, content
+// null). Row-state invariant — exactly one of these two shapes, never both
+// null:
+//   legacy    : content non-null, hash null   (DB holds the bytes)
+//   R2-backed : content null,     hash set     (bytes in R2, hash = sha256)
+// With no R2_* env configured, every row is written legacy (byte-identical to
+// the pre-R2 behavior); with R2 configured, changed files flip to R2-backed
+// lazily. Both shapes coexist permanently — reads (getSessionFiles) handle
+// each.
 // ---------------------------------------------------------------------------
 
 export const files = pgTable(
@@ -229,7 +240,10 @@ export const files = pgTable(
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
     path: text("path").notNull(),
-    content: text("content").notNull(),
+    // Nullable now: null for R2-backed rows (bytes fetched from R2 by hash).
+    content: text("content"),
+    // sha256 hex of the content for R2-backed rows; null for legacy rows.
+    hash: text("hash"),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

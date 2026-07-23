@@ -6,6 +6,7 @@ import { getSessionFiles } from "@/server/files";
 import { runAgentLoop } from "@/server/agent";
 import { ensureSessionDatabase } from "@/server/project-db";
 import { getSandboxDir, writeSnapshotFiles } from "@/server/sandbox";
+import { copyObject, isR2Configured, sessionFileKey } from "@/server/r2";
 import { setJobApiKeys, type UserApiKeys } from "@/server/user-keys";
 import type { JobRow, SessionRow } from "@/server/jobs";
 
@@ -106,22 +107,51 @@ export async function forkSession(sessionId: string): Promise<{
     .values({ projectId: original.projectId, parentSessionId: original.id })
     .returning();
 
-  const originalFiles = await getSessionFiles(sessionId);
-  if (originalFiles.length > 0) {
+  // Copy the index rows RAW (path/content/hash as-is) rather than from
+  // hydrated content, so an R2-backed original stays R2-backed on the fork
+  // instead of collapsing every file back into a legacy content row.
+  const rawRows = await db
+    .select({ path: filesTable.path, content: filesTable.content, hash: filesTable.hash })
+    .from(filesTable)
+    .where(eq(filesTable.sessionId, sessionId));
+
+  if (rawRows.length > 0) {
     await db
       .insert(filesTable)
       .values(
-        originalFiles.map((f) => ({
+        rawRows.map((r) => ({
           sessionId: forked.id,
-          path: f.path,
-          content: f.content,
+          path: r.path,
+          content: r.content,
+          hash: r.hash,
         }))
       )
       .onConflictDoNothing({ target: [filesTable.sessionId, filesTable.path] });
 
-    // Same content, written onto the forked session's own sandbox path —
-    // not a copy of the original's on-disk directory, so a since-orphaned or
-    // never-started original doesn't block the fork from getting real files.
+    // For R2-backed rows, copy the underlying objects to the fork's own key
+    // prefix. Best-effort per file (a failed copy just means that one file is
+    // skipped on the fork's first hydrate) — a storage hiccup must never fail
+    // the fork, matching the Neon-branch stance below.
+    if (isR2Configured()) {
+      const r2Paths = rawRows.filter((r) => r.hash != null).map((r) => r.path);
+      for (let i = 0; i < r2Paths.length; i += 8) {
+        await Promise.all(
+          r2Paths.slice(i, i + 8).map((p) =>
+            copyObject(sessionFileKey(sessionId, p), sessionFileKey(forked.id, p)).catch((err) =>
+              console.error(`[sessions] fork R2 copy failed for ${p}`, err)
+            )
+          )
+        );
+      }
+    }
+  }
+
+  // Hydrated content, written onto the forked session's own sandbox path —
+  // not a copy of the original's on-disk directory, so a since-orphaned or
+  // never-started original doesn't block the fork from getting real files.
+  // Also feeds the file-count/paths summary message below.
+  const originalFiles = await getSessionFiles(sessionId);
+  if (originalFiles.length > 0) {
     writeSnapshotFiles(getSandboxDir(forked.id), originalFiles);
   }
 
