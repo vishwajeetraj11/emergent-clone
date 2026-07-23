@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -72,6 +72,15 @@ export interface SandboxProvider {
    * until its timeout either.
    */
   stop(sessionId: string): Promise<void>;
+  /**
+   * Optional: PERMANENT teardown for project deletion — distinct from stop(),
+   * which under Vercel is only a resumable pause. VercelSandboxProvider
+   * implements this as Sandbox.delete() (the VM becomes inert, no resume). The
+   * local provider omits it (its permanent teardown is stop() + local-dir
+   * removal, both handled by deleteProject); call sites optional-chain it, same
+   * convention as syncFiles?.().
+   */
+  destroy?(sessionId: string): Promise<void>;
   getStatus(sessionId: string): SandboxStatus;
   /**
    * Phase 3 persistence/fork primitive: writes a `files`-table snapshot back
@@ -150,6 +159,24 @@ export const TEMPLATE_DIR = path.join(process.cwd(), "src", "server", "sandbox-t
 
 export function getSandboxDir(sessionId: string): string {
   return path.join(SANDBOX_ROOT, sessionId);
+}
+
+/**
+ * Permanently removes a session's on-disk sandbox directory — used by project
+ * deletion so a deleted project leaves no local files behind (local dirs exist
+ * under BOTH sandbox providers: the build/debug agent always edits locally,
+ * and the Vercel provider only mirrors that copy remotely). This is the ONLY
+ * `rm` in src/; the guard below ensures a malformed/hostile sessionId (e.g.
+ * one containing `..` or an absolute path) can never resolve outside
+ * SANDBOX_ROOT, same escape-check spirit as writeSnapshotFiles above.
+ */
+export function removeSandboxDir(sessionId: string): void {
+  const root = path.resolve(SANDBOX_ROOT);
+  const dir = path.resolve(getSandboxDir(sessionId));
+  if (dir === root || !dir.startsWith(root + path.sep)) {
+    return; // would escape SANDBOX_ROOT — refuse
+  }
+  rmSync(dir, { recursive: true, force: true });
 }
 
 /**

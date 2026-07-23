@@ -135,6 +135,30 @@ export class VercelSandboxProvider implements SandboxProvider {
     registry.set(sessionId, { sandbox: null, url: "", state: "stopped" });
   }
 
+  /**
+   * PERMANENT teardown for project deletion — Sandbox.delete() (VM becomes
+   * inert, no resume), unlike stop()'s resumable pause. Same in-flight-await +
+   * registry-or-lookup structure as stop(); best-effort (a not-found throw for
+   * a session that never started a VM is the common benign case). On success
+   * the session is fully forgotten from the registry rather than left as a
+   * "stopped" tombstone.
+   */
+  async destroy(sessionId: string): Promise<void> {
+    const inFlight = startingPromises.get(sessionId);
+    if (inFlight) await inFlight.catch(() => {});
+
+    const entry = registry.get(sessionId);
+    try {
+      const sandbox =
+        entry?.sandbox ??
+        (await Sandbox.get({ name: sessionId, resume: false, ...resolveCredentials() }));
+      await sandbox.delete();
+    } catch (err) {
+      console.error(`[sandbox-vercel] failed to delete sandbox for session ${sessionId}`, err);
+    }
+    registry.delete(sessionId);
+  }
+
   getStatus(sessionId: string): SandboxStatus {
     const entry = registry.get(sessionId);
     if (!entry) return { state: "stopped" };
