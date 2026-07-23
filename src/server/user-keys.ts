@@ -1,24 +1,12 @@
-// ---------------------------------------------------------------------------
-// BYOK (bring-your-own-key): a user can paste their own Anthropic/OpenAI API
-// key so their builds bill their key instead of the platform's. This module
-// is the process-local, in-memory store that carries a key from a job-start
-// request into that job's agent loop — see src/server/jobs.ts /
-// src/server/sessions.ts (setJobApiKeys, right before runAgentLoop fires),
-// src/server/agent.ts (getJobApiKeys per phase, clearJobApiKeys in
-// runAgentLoop's finally), and src/server/llm.ts (resolveModel/resolvePlannerModel/
-// resolveBuilderModel, which treat a user key as an override — it takes
-// precedence over the platform's env key when both exist).
+// BYOK (bring-your-own-key): the process-local, in-memory store carrying a
+// user's own API key from a job-start request into that job's agent loop. A
+// user key overrides the platform env key when both exist (src/server/llm.ts).
 //
 // SECURITY CONTRACT: a value stored here must never reach the DB, an
-// `appendEvent` payload, `console.*`, or any API response — this store exists
-// ONLY so the AI SDK runtime can pick it up while resolving a model for that
-// job's own agent calls. It never touches the sandbox VM (no writeFiles,
-// no env changes there — the sandbox is out of scope for this feature
-// entirely). The map is plain process memory keyed by jobId, nothing more:
-// a server restart mid-job silently degrades that job back to platform keys
-// (same accepted limitation as the rest of this in-process runtime — see
-// src/server/jobs.ts's durability note) rather than failing it.
-// ---------------------------------------------------------------------------
+// appendEvent payload, console.*, or any API response. It exists only so the
+// AI SDK can pick it up while resolving a model, and never touches the sandbox
+// VM. A server restart mid-job silently degrades that job back to platform keys
+// rather than failing it (see jobs.ts's durability note).
 
 export interface UserApiKeys {
   anthropic?: string;
@@ -30,16 +18,12 @@ const MAX_KEY_LENGTH = 512;
 
 /**
  * Validates the client-supplied `apiKeys` field of a job-start request body.
- * Anything that isn't a plain object is rejected outright; each of
- * `anthropic`/`openai` is kept only if it's a string that trims to 10-512
- * characters, everything else (wrong type, too short/long, unknown extra
- * fields) is dropped silently. Returns `undefined` when nothing valid was
- * found, so callers can write `if (apiKeys) setJobApiKeys(...)`.
+ * Returns undefined when nothing valid was found, so callers can write
+ * `if (apiKeys) setJobApiKeys(...)`.
  *
- * NEVER throws, regardless of input shape, and never includes the submitted
- * value in any return value or side effect — this parses untrusted request
- * bodies, and a malformed body degrading to "no BYOK keys for this job" is
- * always the right outcome, not an error that might echo the bad input back.
+ * NEVER throws and never echoes the submitted value: this parses untrusted
+ * bodies, and degrading to "no BYOK keys for this job" is always the right
+ * outcome rather than an error that might reflect the bad input back.
  */
 export function parseUserApiKeys(raw: unknown): UserApiKeys | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
@@ -58,8 +42,7 @@ export function parseUserApiKeys(raw: unknown): UserApiKeys | undefined {
 }
 
 // Keyed by jobId, not sessionId/userId: a job is the unit of "one agent run",
-// and the whole point of this store is to ride alongside exactly one such
-// run from its start request to its runAgentLoop finally.
+// which is exactly the lifetime this store needs to span.
 const jobApiKeys = new Map<string, UserApiKeys>();
 
 export function setJobApiKeys(jobId: string, keys: UserApiKeys): void {

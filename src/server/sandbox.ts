@@ -1,29 +1,18 @@
 import path from "node:path";
-// NOTE: this creates a (safe) circular import — sandbox-vercel.ts imports
-// TEMPLATE_DIR and the types below back from this file. Safe because: (1) the
-// type imports it uses are erased at compile time, and (2) the one value
-// import it uses (TEMPLATE_DIR) is only ever read from inside a method body,
-// never at that module's own top level, so it's never touched before this
-// module has finished initializing it.
+// Circular import, and safe: sandbox-vercel.ts imports TEMPLATE_DIR and the
+// types below back from here. The types erase at compile time, and TEMPLATE_DIR
+// is only ever read inside a method body, never at that module's top level.
 import { VercelSandboxProvider } from "./sandbox-vercel";
 
-// ---------------------------------------------------------------------------
-// Sandbox provider interface + the Vercel sandbox factory.
-//
 // Builds run remotely inside a Vercel Sandbox (Firecracker microVM): the
-// agent's tools + snapshot execute in the VM (src/server/agent-tools.ts,
-// src/server/files.ts), which also serves the preview. There is no local
-// build runtime on this branch — the free local `claude` CLI + local-dir
-// version lives on the `local-claude-cli` branch.
-// ---------------------------------------------------------------------------
+// agent's tools and snapshot execute in the VM (src/server/agent-tools.ts,
+// src/server/files.ts), which also serves the preview. There is no local build
+// runtime on this branch — that version lives on `local-claude-cli`.
 
 export interface SandboxStartResult {
   /**
-   * Full URL the preview iframe should point at — VercelSandboxProvider's own
-   * public HTTPS domain (its VM's internal port isn't reachable from a browser
-   * on a different machine, so the interface deals in URLs, not ports).
-   * Threaded to the client via runBuildPhase's preview_ready event + the
-   * restore route.
+   * Full URL for the preview iframe. The interface deals in URLs, not ports:
+   * the VM's internal port isn't reachable from a browser on another machine.
    */
   url: string;
 }
@@ -48,27 +37,19 @@ export interface SandboxProvider {
   /** Idempotent: calling twice for a session already running just returns its URL. */
   start(sessionId: string, options?: SandboxStartOptions): Promise<SandboxStartResult>;
   /**
-   * Tears down sessionId's sandbox. Under VercelSandboxProvider (v2) this is a
-   * pause, not a deletion: stop() snapshots the filesystem, and the next
-   * start()/restoreFromSnapshot() (via Sandbox.getOrCreate) resumes it in
-   * seconds rather than reinstalling from scratch. Called from runBuildPhase's
-   * failure paths and eagerly from /api/sessions/[id]/stop-preview on
-   * navigate-away/tab-close.
+   * A pause, not a deletion: stop() snapshots the filesystem and the next
+   * start()/restoreFromSnapshot() resumes it in seconds rather than
+   * reinstalling. Called from runBuildPhase's failure paths and eagerly from
+   * /api/sessions/[id]/stop-preview on navigate-away/tab-close.
    */
   stop(sessionId: string): Promise<void>;
-  /**
-   * PERMANENT teardown for project deletion — distinct from stop()'s resumable
-   * pause. VercelSandboxProvider implements this as Sandbox.delete() (the VM
-   * becomes inert). Optional-chained at call sites.
-   */
+  /** PERMANENT teardown for project deletion — unlike stop(), not resumable. */
   destroy?(sessionId: string): Promise<void>;
   getStatus(sessionId: string): SandboxStatus;
   /**
-   * Persistence/fork primitive: brings a session's sandbox back up, seeding the
-   * VM from the passed `files` snapshot (the durable R2-backed index — see
-   * getSessionFiles). If the session already has a live sandbox running,
-   * returns its existing URL. This is what makes an orphaned/expired sandbox
-   * recoverable without an agent rebuild.
+   * Brings a session's sandbox back up, seeding the VM from the passed `files`
+   * snapshot. Returns the existing URL if one is already running. This is what
+   * makes an orphaned/expired sandbox recoverable without an agent rebuild.
    */
   restoreFromSnapshot(
     sessionId: string,
@@ -76,33 +57,22 @@ export interface SandboxProvider {
     options?: SandboxStartOptions
   ): Promise<SandboxStartResult>;
   /**
-   * Optional: pushes already-changed files into a *live* sandbox without a full
-   * restart. Retained on the interface for future callers; the build phase no
-   * longer needs it (the agent edits the VM directly, so its changes are
-   * already live).
+   * Unused by the build phase (the agent edits the VM directly, so its changes
+   * are already live). Retained for future callers.
    */
   syncFiles?(sessionId: string, files: SnapshotFile[]): Promise<void>;
   /**
-   * Optional: reports whether sessionId's sandbox runtime is still alive.
-   * Returns false ONLY when it's known-dead (e.g. a Vercel VM hit its max
-   * timeout mid-session). Every other case — healthy, booting, or
-   * indeterminate — returns true (callers use false to swap the preview iframe
-   * for a "Preview stopped" restart card, so a false positive is worse than a
-   * false negative).
+   * Returns false ONLY when the runtime is known-dead. Healthy, booting, and
+   * indeterminate all return true — callers swap the preview for a "Preview
+   * stopped" card on false, so a false positive is worse than a false negative.
    */
   checkPreviewHealth?(sessionId: string): Promise<boolean>;
 }
 
-// ---------------------------------------------------------------------------
-// The checked-in app template lives at src/server/sandbox-template relative to
-// the repo root (process.cwd() is the repo root for `next dev`/`next start`).
-// Exported so sandbox-vercel-template.ts's readTemplateFilesRecursive() can
-// read the files and seed a fresh remote sandbox's filesystem over the wire.
-// ---------------------------------------------------------------------------
+// process.cwd() is the repo root under `next dev`/`next start`. Exported so
+// readTemplateFilesRecursive() can seed a fresh remote sandbox over the wire.
 export const TEMPLATE_DIR = path.join(process.cwd(), "src", "server", "sandbox-template");
 
-// Builds are remote-only: always the Vercel sandbox. VercelSandboxProvider
-// resolves credentials lazily (per-call, not at construction), so this is safe
-// to build unconditionally — a missing/partial VERCEL_* credential set surfaces
-// as a clear error the first time a sandbox is actually started, not at import.
+// Safe to construct unconditionally: VercelSandboxProvider resolves credentials
+// per-call, so a missing VERCEL_* set surfaces on first start, not at import.
 export const sandboxProvider: SandboxProvider = new VercelSandboxProvider();
