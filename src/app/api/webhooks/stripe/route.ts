@@ -7,7 +7,7 @@ import {
 import { grantStripePurchase } from "@/server/credits";
 
 // ---------------------------------------------------------------------------
-// Phase 4 (Half B, gated inert): Stripe webhook — the ONLY path that ever
+// Stripe webhook — the ONLY path that ever
 // grants purchased credits. Verifies the signature via Stripe's own SDK
 // helper (constructStripeWebhookEvent -> stripe.webhooks.constructEvent)
 // before touching the payload at all; an unsigned/mis-signed request is

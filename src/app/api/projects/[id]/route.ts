@@ -3,10 +3,10 @@ import { assertProjectOwnership } from "@/lib/authz";
 import { deleteProject, getProjectDetail, renameProject } from "@/server/projects";
 
 /**
- * Phase 3 persistence: backs the /p/[projectId] route. Returns the project
+ * Backs the /p/[projectId] route. Returns the project
  * plus its most recent session/job so the client can rebuild its timeline
  * (replaying that job's events from cursor -1 over SSE, same mechanism
- * Phase 1 already uses) and know the job's actual current status.
+ * the timeline already uses) and know the job's actual current status.
  */
 export async function GET(
   _request: Request,

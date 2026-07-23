@@ -67,7 +67,7 @@ export async function POST(
   await appendEvent(jobId, "user", "plan_decision", { planEventId, action, feedback });
   await setJobStatus(jobId, "running");
 
-  // Fire-and-forget resume — see the Phase 1 limitation note in
+  // Fire-and-forget resume — see the durability note in
   // src/server/jobs.ts. Normally a no-op (runAgentLoop's in-process
   // runningJobs guard) since the original call is still parked inside
   // waitForPlanDecision; only matters for the orphaned-process case.

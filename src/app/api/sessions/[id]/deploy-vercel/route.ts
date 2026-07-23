@@ -3,7 +3,7 @@ import { assertSessionOwnership } from "@/lib/authz";
 import { deploySessionToVercel, isVercelConfigured } from "@/server/vercel";
 
 /**
- * Phase 4 (Half B, gated inert): the Deploy button's endpoint. Unconfigured
+ * The Deploy button's endpoint. Unconfigured
  * (default, no VERCEL_TOKEN — always the case in this environment):
  * responds 200 with `configured: false` so the client can surface a clear
  * "Vercel deploy is not configured" state, same pattern as

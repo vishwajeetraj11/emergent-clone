@@ -68,7 +68,7 @@ export async function POST(
   await appendEvent(jobId, "user", "answer", { toolUseId, answers });
   await setJobStatus(jobId, "running");
 
-  // Fire-and-forget resume — see the Phase 1 limitation note in src/server/jobs.ts.
+  // Fire-and-forget resume — see the durability note in src/server/jobs.ts.
   runAgentLoop(jobId).catch((err) => {
     console.error(`[agent] job ${jobId} loop crashed on resume`, err);
   });

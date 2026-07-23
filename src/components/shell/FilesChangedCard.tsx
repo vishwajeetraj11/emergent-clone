@@ -12,7 +12,7 @@ interface SessionFile {
 }
 
 /**
- * Phase 2 timeline card for a `files_changed` event — collapsed by default
+ * Timeline card for a `files_changed` event — collapsed by default
  * ("Viewing N paths"), expands into a tabbed, read-only, monospace file
  * viewer. Fetches file contents lazily (on first expand) from
  * GET /api/sessions/[id]/files, since the event payload only carries paths.

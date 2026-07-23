@@ -17,7 +17,7 @@
 // entirely). The map is plain process memory keyed by jobId, nothing more:
 // a server restart mid-job silently degrades that job back to platform keys
 // (same accepted limitation as the rest of this in-process runtime — see
-// src/server/jobs.ts's Phase 1 limitation note) rather than failing it.
+// src/server/jobs.ts's durability note) rather than failing it.
 // ---------------------------------------------------------------------------
 
 export interface UserApiKeys {

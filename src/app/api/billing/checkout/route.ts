@@ -3,7 +3,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { createCreditCheckoutSession, isStripeConfigured } from "@/server/stripe";
 
 /**
- * Phase 4 (Half B, gated inert): the "Buy Credits" button's endpoint.
+ * The "Buy Credits" button's endpoint.
  * Unconfigured (default, no STRIPE_SECRET_KEY — always the case in this
  * environment): responds 200 with `configured: false` so the client can
  * surface a clear "Stripe is not configured" state, same pattern as

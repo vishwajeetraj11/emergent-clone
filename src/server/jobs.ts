@@ -20,19 +20,18 @@ const MAX_SLUG_ATTEMPTS = 5;
  * Creates a project + session + job for a fresh prompt, seeds event seq 0
  * with the user's message, and kicks off the agent loop.
  *
- * PHASE 1 LIMITATION: the agent loop is started as a detached promise inside
- * this Node process (see runAgentLoop / src/server/agent.ts). It is not
- * durable — if the dev server restarts (hot reload, crash, redeploy) while a
- * job is running or waiting_on_user, that job is orphaned: its status stays
- * whatever it last was in the DB, but nothing will ever resume it. This is
- * acceptable for Phase 1; a durable queue/worker is out of scope until a
- * later phase.
+ * DURABILITY LIMITATION: the agent loop is started as a detached promise
+ * inside this Node process (see runAgentLoop / src/server/agent.ts). It is not
+ * durable — if the server restarts (hot reload, crash, redeploy) while a job
+ * is running or waiting_on_user, that job is orphaned: its status stays
+ * whatever it last was in the DB, but nothing will ever resume it. A durable
+ * queue/worker is the fix, and is not built.
  */
 export async function createProjectAndJob(prompt: string, model?: string, apiKeys?: UserApiKeys) {
   const db = getDb();
 
   const owner = await getCurrentUser();
-  // Phase 4: idempotent — only actually grants credits the first time this
+  // Idempotent — only actually grants credits the first time this
   // user is seen (see src/server/credits.ts's ensureSignupBonus).
   await ensureSignupBonus(owner.id);
 
@@ -87,8 +86,7 @@ export async function createProjectAndJob(prompt: string, model?: string, apiKey
   // while resolving models for this job.
   if (apiKeys) setJobApiKeys(job.id, apiKeys);
 
-  // Fire-and-forget: intentionally not awaited. See the Phase 1 limitation
-  // note above.
+  // Fire-and-forget: intentionally not awaited. See the durability note above.
   runAgentLoop(job.id).catch((err) => {
     console.error(`[agent] job ${job.id} loop crashed`, err);
   });
@@ -117,8 +115,8 @@ export async function setJobStatus(
 
 /**
  * Persists the Claude Agent SDK session id for a job's main (scoping) query
- * so a later phase can resume it. Phase 1 only stores this — it does not
- * implement resuming a query() from a new process.
+ * so it can be resumed later. Only stored today — resuming a query() from a
+ * new process is not implemented.
  */
 export async function setAgentSessionId(
   jobId: string,

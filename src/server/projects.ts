@@ -8,7 +8,7 @@ import { cancelScheduledStop } from "@/server/preview-stop-scheduler";
 import { sandboxProvider } from "@/server/sandbox";
 
 // ---------------------------------------------------------------------------
-// Phase 3: read-side helper for the persistence route (GET /api/projects/[id])
+// Read-side helper for the persistence route (GET /api/projects/[id])
 // — loads a project plus its most recent session and that session's most
 // recent job, so a real bookmarkable/reloadable URL (/p/[projectId]) can
 // rebuild client state from Postgres alone. A fork creates a new session

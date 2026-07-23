@@ -65,10 +65,10 @@ export function PreviewFrame({
             <p className="text-sm text-muted-foreground">Loading the app…</p>
           </div>
         )}
-        {/* Phase 2: the sandbox is a real local child process running
-            agent-generated code (see src/server/sandbox.ts) — sandboxed
-            iframe attributes reflect that it's untrusted-ish generated
-            output, not a same-origin first-party page. */}
+        {/* This serves agent-generated code from a Vercel Sandbox VM (see
+            src/server/sandbox-vercel.ts) — the sandbox attributes reflect
+            that it's untrusted generated output, not a same-origin
+            first-party page. */}
         <iframe
           key={frameKey}
           src={previewUrl}

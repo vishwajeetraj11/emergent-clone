@@ -3,12 +3,12 @@ import { getDb } from "@/db";
 import { creditLedger, jobs, projects, sessions } from "@/db/schema";
 
 // ---------------------------------------------------------------------------
-// Phase 4 (Half A, REAL): credit ledger accounting.
+// Credit ledger accounting.
 //
-// The `credit_ledger` table has existed since Phase 0 (userId, delta, reason,
+// The `credit_ledger` table has existed from the start (userId, delta, reason,
 // jobId) but nothing ever wrote real rows into it — this file is what turns
 // it into an actual accounting system. Every `usage` event appended by the
-// agent loop (src/server/agent.ts, logged since Phase 1) now produces a
+// agent loop (src/server/agent.ts, logged from the start) now produces a
 // matching negative ledger row via debitForJobUsage, called right after each
 // `appendEvent(jobId, "system", "usage", ...)`. Debiting happens
 // incrementally, per usage event, not via a full-history recompute — cheap

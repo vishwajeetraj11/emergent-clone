@@ -17,10 +17,10 @@ export function TopBar({
 }: {
   project?: ProjectSummary | null;
   jobStatus?: JobStatus | null;
-  /** Phase 3: real navigation for the Home button — back to `/` (the
+  /** Real navigation for the Home button — back to `/` (the
    * "what will you build" composer), not just a visual reset. */
   onNavigateHome?: () => void;
-  /** Phase 3: real navigation for a project tab — to /p/[projectId]. */
+  /** Real navigation for a project tab — to /p/[projectId]. */
   onSelectProject?: (projectId: string) => void;
   /** PATCH /api/projects/[id] — see useAgentSession's renameProject. */
   onRenameProject?: (name: string) => Promise<void>;

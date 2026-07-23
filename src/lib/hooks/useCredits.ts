@@ -7,13 +7,13 @@ import type { JobStatus } from "@/lib/types";
 type BuyStatus = "idle" | "loading" | "not_configured" | "error";
 
 /**
- * Phase 4 (Half A, REAL): the "Buy Credits" pill's actual credit_ledger
+ * The "Buy Credits" pill's actual credit_ledger
  * balance (GET /api/credits) instead of being a purely decorative label.
  * Refetched whenever the active job's status changes, since a
  * running/just-finished job is exactly when new `usage` events (and their
  * matching ledger debits) land.
  *
- * Phase 4 (Half B, gated inert): buyCredits() attempts a real Stripe
+ * BuyCredits() attempts a real Stripe
  * Checkout session (src/server/stripe.ts) when configured, and surfaces
  * "Stripe is not configured" otherwise — never a silent no-op.
  */

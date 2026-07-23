@@ -1,5 +1,5 @@
 /**
- * Shared shapes for the Phase 1 job/event core. These mirror the wire format
+ * Shared shapes for the job/event core. These mirror the wire format
  * sent over SSE (see src/app/api/jobs/[id]/stream/route.ts) and are used by
  * both server code (src/server/*) and client hooks/components.
  */
@@ -27,10 +27,10 @@ export type TimelineEventType =
   | "status"
   | "usage"
   | "error"
-  // Phase 2: emitted once the build phase upserts changed files into the
+  // Emitted once the build phase upserts changed files into the
   // `files` table for this session — payload: { paths: string[] }.
   | "files_changed"
-  // Phase 2: emitted once the sandbox's dev server responds 200 —
+  // Emitted once the sandbox's dev server responds 200 —
   // payload: { url: string }.
   | "preview_ready"
   // Orchestration: a plan is ready for the user's approve/revise decision —

@@ -113,11 +113,11 @@ export const sessions = pgTable("sessions", {
     (): AnyPgColumn => sessions.id,
     { onDelete: "set null" }
   ),
-  // Phase 3: last GitHub repo this session's files were pushed to (Save
+  // Last GitHub repo this session's files were pushed to (Save
   // button), nullable — stays null until the GitHub App is configured and
   // the current user has connected it, and a save actually succeeds.
   githubRepoUrl: text("github_repo_url"),
-  // Phase 4: last Vercel deployment URL for this session's files ("Deploy
+  // Last Vercel deployment URL for this session's files ("Deploy
   // Your Application"), nullable — stays null until a real VERCEL_TOKEN is
   // configured and a deploy actually succeeds. Mirrors githubRepoUrl above.
   vercelDeploymentUrl: text("vercel_deployment_url"),

@@ -30,7 +30,7 @@ function statusDotClass(status: ProjectTab["status"]) {
 }
 
 /**
- * The open-project tab strip. Phase 1 only ever drives a single active
+ * The open-project tab strip. Only ever drives a single active
  * project, so the tab list is derived directly from props on every render
  * rather than mirrored into state via an effect. Local state only tracks
  * UI-only overrides: a tab the user dismissed, or manually clicking a

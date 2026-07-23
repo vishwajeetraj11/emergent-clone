@@ -1,7 +1,7 @@
 import Stripe from "stripe";
 
 // ---------------------------------------------------------------------------
-// Phase 4 (Half B, gated inert): Stripe billing — "Buy Credits". Same
+// Stripe billing — "Buy Credits". Same
 // pattern as Clerk (src/lib/auth.ts) and GitHub (src/server/github-app.ts):
 // isStripeConfigured() gates everything else in this file, real Stripe SDK
 // usage underneath, inert/clear-error behavior when unconfigured.

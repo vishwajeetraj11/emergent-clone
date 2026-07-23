@@ -3,7 +3,7 @@ import { assertSessionOwnership } from "@/lib/authz";
 import { getSessionFiles } from "@/server/files";
 
 /**
- * Phase 2: latest file snapshot for a session, for the timeline's "Viewing N
+ * Latest file snapshot for a session, for the timeline's "Viewing N
  * paths" file viewer.
  */
 export async function GET(

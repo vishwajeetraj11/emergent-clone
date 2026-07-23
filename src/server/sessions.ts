@@ -9,11 +9,10 @@ import { setJobApiKeys, type UserApiKeys } from "@/server/user-keys";
 import type { JobRow, SessionRow } from "@/server/jobs";
 
 // ---------------------------------------------------------------------------
-// Phase 3: session-scoped operations that don't fit createProjectAndJob's
+// Session-scoped operations that don't fit createProjectAndJob's
 // "brand new project" shape — continuing to chat against an existing
 // session, and forking one. Deliberately kept separate from
-// src/server/jobs.ts / src/server/agent.ts, which Phase 1/2 already own and
-// this phase doesn't need to change.
+// src/server/jobs.ts / src/server/agent.ts, which own the create-and-run path.
 // ---------------------------------------------------------------------------
 
 export async function getSession(sessionId: string): Promise<SessionRow | null> {

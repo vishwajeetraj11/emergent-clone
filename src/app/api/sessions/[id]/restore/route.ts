@@ -5,8 +5,8 @@ import { sandboxProvider } from "@/server/sandbox";
 import { cancelScheduledStop } from "@/server/preview-stop-scheduler";
 
 /**
- * Phase 3 persistence: brings a session's sandbox back up from its `files`
- * table snapshot — the real fix for the Phase 1/2 "orphaned sandbox"
+ * Brings a session's sandbox back up from its `files`
+ * table snapshot — the real fix for the old "orphaned sandbox"
  * limitation (dev-server restart kills the in-memory registry, but the
  * files were always durable in Postgres). Idempotent: if the sandbox is
  * already running (never orphaned, or already restored earlier in this

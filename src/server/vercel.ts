@@ -4,7 +4,7 @@ import { deployments, sessions } from "@/db/schema";
 import { getSessionFiles } from "@/server/files";
 
 // ---------------------------------------------------------------------------
-// Phase 4 (Half B, gated inert): Vercel deploy ("Deploy Your Application" —
+// Vercel deploy ("Deploy Your Application" —
 // the onboarding carousel slide in src/components/shell/PreviewPanel.tsx).
 // Same pattern as Clerk (src/lib/auth.ts) and GitHub (src/server/github-app.ts):
 // isVercelConfigured() gates everything else in this file, real Vercel REST

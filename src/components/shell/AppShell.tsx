@@ -8,7 +8,7 @@ import { PreviewPanel } from "@/components/shell/PreviewPanel";
 import { useAgentSession } from "@/lib/hooks/useAgentSession";
 
 /**
- * `initialProjectId` is set by /p/[projectId] (Phase 3 persistence route) —
+ * `initialProjectId` is set by /p/[projectId] (the persistence route) —
  * when present, AppShell loads that project instead of showing the empty
  * "what will you build" composer. The `/` route renders AppShell with no
  * prop and, once a project is created, navigates to its real /p/[id] URL.

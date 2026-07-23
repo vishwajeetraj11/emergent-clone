@@ -454,7 +454,7 @@ export function ChatPanel({
   }, [events.length]);
 
   // Once a job reaches a terminal status, the session (and its sandbox) is
-  // still there — Phase 3 lets the user keep chatting against it (a new job
+  // still there — the user can keep chatting against it (a new job
   // under the same session; see continueChat in useAgentSession) instead of
   // being stuck answering questions forever.
   const canContinueChat = hasProject && TERMINAL_STATUSES.has(jobStatus ?? "running");

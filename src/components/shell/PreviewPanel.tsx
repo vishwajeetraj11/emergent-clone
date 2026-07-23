@@ -22,7 +22,7 @@ export function PreviewPanel({
   onNavigateHome,
 }: {
   previewUrl?: string | null;
-  /** Phase 3: POST /api/sessions/[id]/restore is in flight — bringing the
+  /** POST /api/sessions/[id]/restore is in flight — bringing the
    * sandbox back up from its `files` snapshot (persistence / fork). */
   isRestoring?: boolean;
   restoreError?: string | null;

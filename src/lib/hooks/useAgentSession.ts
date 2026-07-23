@@ -28,12 +28,12 @@ interface AgentSessionState {
   events: TimelineEvent[];
   isStarting: boolean;
   error: string | null;
-  /** Set once a `preview_ready` event lands for the active job (Phase 2), or
-   * once a Phase 3 sandbox restore/fork resolves a port directly. */
+  /** Set once a `preview_ready` event lands for the active job, or
+   * once a sandbox restore/fork resolves a port directly. */
   previewUrl: string | null;
-  /** Phase 3: loading an existing project by id (GET /api/projects/[id]). */
+  /** Loading an existing project by id (GET /api/projects/[id]). */
   isLoadingProject: boolean;
-  /** Phase 3: POST /api/sessions/[id]/restore is in flight. */
+  /** POST /api/sessions/[id]/restore is in flight. */
   isRestoringPreview: boolean;
   restoreError: string | null;
   /** Set when a background health poll (GET /api/sessions/[id]/preview-health)
@@ -41,15 +41,15 @@ interface AgentSessionState {
    * tab was open. PreviewPanel swaps the (now-stale) iframe for a "Preview
    * stopped" restart card when this is true. */
   isPreviewDead: boolean;
-  /** Phase 3: POST /api/sessions/[id]/fork is in flight. */
+  /** POST /api/sessions/[id]/fork is in flight. */
   isForking: boolean;
-  /** Phase 3: sending a new top-level message against an existing session
+  /** Sending a new top-level message against an existing session
    * (continuing to chat after a job reached a terminal status). */
   isSendingMessage: boolean;
   saveState: SaveState;
   saveMessage: string | null;
   saveUrl: string | null;
-  /** Phase 4 (Half B, gated inert): Vercel deploy — see src/server/vercel.ts. */
+  /** Vercel deploy — see src/server/vercel.ts. */
   deployState: DeployState;
   deployMessage: string | null;
   deployUrl: string | null;
@@ -143,9 +143,9 @@ const INITIAL_STATE: AgentSessionState = {
 };
 
 /**
- * Owns the chat/agent-loop client state: creating a project+job (Phase 1),
- * subscribing to its SSE event stream (Phase 1), answering clarifying
- * questions (Phase 1), and — Phase 3 — loading an existing project by id,
+ * Owns the chat/agent-loop client state: creating a project+job,
+ * subscribing to its SSE event stream, answering clarifying
+ * questions, loading an existing project by id,
  * restoring its sandbox from the `files` snapshot, forking a session, and
  * continuing to chat against an existing session once its job is done.
  */
@@ -378,7 +378,7 @@ export function useAgentSession() {
   }, [state.sessionId, state.previewUrl]);
 
   /**
-   * Phase 3: tries to bring a session's sandbox up from its `files`
+   * Tries to bring a session's sandbox up from its `files`
    * snapshot and reflect the resulting preview URL — used both after
    * loading an existing project (persistence) and right after a fork
    * (independent sandbox for the new session). A 404 (no snapshot yet,
@@ -480,7 +480,7 @@ export function useAgentSession() {
   );
 
   /**
-   * Phase 3 persistence entry point: loads an existing project by id
+   * Persistence entry point: loads an existing project by id
    * (GET /api/projects/[id]), fetches the session's FULL event history
    * across every job it has ever run (GET /api/sessions/[id]/events — a
    * session can span many jobs: the initial build plus one per "continue
@@ -854,7 +854,7 @@ export function useAgentSession() {
     [state.project?.id]
   );
 
-  /** Vercel deploy (Half B — see src/server/vercel.ts): gated inert when
+  /** Vercel deploy (see src/server/vercel.ts): gated inert when
    * VERCEL_TOKEN isn't configured, surfaced as deployState "not_configured"
    * rather than a silent no-op or a thrown error. */
   const deployToVercel = useCallback(async () => {
