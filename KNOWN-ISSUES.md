@@ -5,113 +5,114 @@ repeated. Fixed issues move to `CHANGELOG.md` and come out of this file.
 
 ---
 
-## 1. Template fixes never reach existing sessions (open)
+## 1. Template changes never reach existing sessions (open, low severity today)
 
-**Symptom.** A generated app loads in the preview iframe and looks fine — HTML
-renders, CSS applies, all JS chunks return 200 — but it is completely inert.
-Buttons do nothing. Anything gated behind a client effect never appears: an app
-whose shell waits on a `useEffect` flag shows its loading spinner forever, and
-an app that generates its content client-side renders an empty page. No console
-error, no warning, no unhandled rejection, no Next.js error overlay. React
-simply never hydrates.
+**In one sentence.** Upgrading `src/server/sandbox-template/` only affects
+sessions created after the upgrade; every session already in the database keeps
+its original copy of those files forever.
 
-**How to recognize it fast.** In the sandbox page, count React fibers:
+**Worked example.** Alice creates a session today. The template's 7 files are
+copied into her sandbox, the agent builds her app, and the whole tree is saved
+as her snapshot. Next week you bump the template's `package.json` from Next
+16.2.10 to 16.3. Alice returns: her sandbox is rebuilt from *her snapshot*, so
+she gets 16.2.10 again, and will on every future restore. Bob, creating a
+session that same day, copies from the template and gets 16.3. Two users on
+different versions permanently, with nothing in any log to explain it.
 
-```js
-let n = 0;
-for (const e of document.querySelectorAll('*')) {
-  if (Object.keys(e).some(k => k.startsWith('__react'))) n++;
-}
-```
+**Mechanism.** A session reads the template exactly once, at creation. After
+that it lives entirely off its snapshot: `restoreFromSnapshot`
+(`src/server/sandbox-vercel.ts:86`) boots the VM from the session's `files`
+index rows plus their R2 bytes — hydrated by `getSessionFiles` at
+`src/app/api/sessions/[id]/restore/route.ts:30` — and never consults the
+template again. The template is a fork point, not a live dependency.
 
-A healthy page has dozens (82 for the Habit Tracker app). A page hitting this
-bug has ~2 — React is attached only to a hoisted `<link>` and to Next's own
-devtools portal, never to the app tree.
+**Half of that is correct behavior, which is why it is not a one-line fix.** The
+agent edits template-owned files all the time — `app/page.tsx` *is* the user's
+app. Re-reading the template on restore would silently revert those edits, and
+`restoreFromSnapshot`'s doc comment exists to prevent exactly that. The real
+defect is narrower: the code cannot tell an agent-edited file from one the agent
+never touched, so it conservatively treats every file as agent-owned. Safe, but
+it means no template change ever lands anywhere.
 
-**Root cause.** `next dev` blocks cross-origin requests to dev-only endpoints.
-`node_modules/next/dist/server/lib/router-server.js:615` runs `blockCrossSiteDEV`
-on the HTTP **upgrade** handler, so the Turbopack HMR WebSocket upgrade is
-rejected unless the requesting host is in `allowedDevOrigins`. The dev server
-boots as localhost; the browser reaches it at `https://sb-*.vercel.run`. The
-socket closes `1006` without ever opening, and Turbopack's dev client entry
-never resolves — so hydration never starts. Static HTML and chunks are served
-by ordinary request handling and are unaffected, which is exactly why the page
-looks healthy.
+**Why it is low severity right now (checked 2026-07-24).** Nothing is stale, and
+the blast radius is currently zero: the seven live sessions are all one-day-old
+throwaway scaffolds (`minimal-next-149`, `single-page-552`, `markdown-note-440`,
+…), created after every template change to date. If a template edit stranded
+them today, the correct response would be to delete them.
 
-Confirmed causally, not just by correlation: taking a **working** local dev
-app and redirecting only its `WebSocket` to a dead port reproduces the failure
-signature exactly (fiber count drops to 2, empty body, no errors). One variable
-changed.
+**Trigger to actually fix it.** Before real users hold sessions worth keeping —
+at that point every existing user becomes Alice, silently and permanently.
 
-**The fix already exists** in `src/server/sandbox-template/next.config.ts`:
+**Interim measure.** When touching `src/server/sandbox-template/`, delete the
+existing sessions rather than assuming they inherit the change.
 
-```ts
-allowedDevOrigins: ["*.vercel.run"],
-```
+**The fix.** Tell "agent never touched this" apart from "agent wrote this" by
+remembering every version the template has ever had.
 
-Added in `3d247ac` (2026-07-19), the commit that introduced the Vercel provider.
-Sessions created after it are fine.
+1. **History manifest.** A script walks the git history of
+   `src/server/sandbox-template/`, sha256s every version of every path, and
+   writes a committed JSON — `{ "next.config.ts": ["3f2a…", "9c11…"], … }`.
+   Regenerated whenever the template changes.
 
-**The actual open defect.** `VercelSandboxProvider.restoreFromSnapshot` seeds
-the VM from the session's DB `files` snapshot, deliberately *not* from the
-template — re-reading the template risks reverting agent edits to template-owned
-files (see its doc comment). Correct as far as it goes, but the consequence is
-that **no template fix ever reaches an already-existing session.** Sessions
-whose snapshot predates `3d247ac` still carry the old empty `next.config.ts` and
-will stay broken forever. Every future template change inherits the same blind
-spot.
+2. **Reconcile on boot**, per file in the current template:
 
-Affected sessions (checked against the `files` table), and the state of the
-2026-07-22 manual data repair — each stale row had the *identical* untouched
-`const nextConfig: NextConfig = {};`, so replacing it with the template
-verbatim preserved no agent customization because there was none:
+   | session's copy | meaning | action |
+   | --- | --- | --- |
+   | hash is in the manifest | never edited — it is just an older template version | overwrite with current template |
+   | hash matches nothing | agent wrote it | leave alone |
+   | path absent from snapshot | agent deleted it | leave deleted |
 
-| session | project | created | state |
-| --- | --- | --- | --- |
-| `5f4e1b75` | guestbook-web-970 | Jul 21 | never affected |
-| `39f75e9b` | personal-finance-296 | Jul 21 | never affected |
-| `83064a15` | single-page-399 | Jul 19 | never affected |
-| `37822353` | single-page-137 | Jul 19 | never affected |
-| `22004529` | simple-color-140 | Jul 19 | repaired |
-| `cc951e0c` | Habit Tracker | Jul 18 | repaired |
-| `8baf3846` | Habit Tracker | Jul 17 | repaired |
-| `15458342` | pipeline-retest-524 | Jul 19 | repaired |
+3. **Both call sites.** `restoreFromSnapshot` (`sandbox-vercel.ts:107`) passes
+   its `files` straight to `bootSandbox`; `buildInitialFileList` (`:294`) merges
+   template and DB rows with DB winning unconditionally. Same hole, same helper.
 
-All four are repaired and verified: every `next.config.ts` row in the `files`
-table now contains `allowedDevOrigins`, zero stale. Note the verification is
-of the stored snapshot, not of each app re-rendering — the mechanism itself
-was proven end-to-end on `cc951e0c` (this exact config, hydrated and
-interactive under `next dev`), so the remaining three follow from identical
-data rather than from three separate live checks.
+4. **Do not write back to the DB.** Reconcile into the VM only — the next
+   `snapshotSessionFiles` reads the corrected file off disk and persists it.
+   Self-healing, no migration, no repair script.
 
-Sessions `9fa95770` (refactor-smoke-225), `2996695c` (orchestration-pipeline-843)
-and `4a1e8157` (raf-batching-321) have **0 files** — they never built, so there
-is no snapshot to repair and they will seed from the current template on their
-first build.
+5. **One test** recomputes the current template's hashes and asserts each is
+   present in the manifest, so editing the template without regenerating it
+   fails the build — that omission is precisely what creates this bug.
 
-A pre-repair backup of every `next.config.ts` row is in the session scratchpad
-as `next-config-backup.json`.
+Roughly 150 lines plus the script and test. Note this needs no schema change and
+does not depend on `files.hash`: `getSessionFiles` already returns content, and
+hashing 7 files in memory is free. Not implemented.
 
-None of this repairs the underlying defect: it patches the four rows that
-happened to be stale today, and the next template change will strand every
-session again.
+**Rejected alternative.** Declaring a fixed set of infra files (`next.config.ts`,
+`tsconfig.json`, `postcss.config.mjs`) permanently template-owned and always
+overwriting them is ~20 lines and needs no manifest. It breaks the first time an
+agent legitimately edits `next.config.ts` (image domains, rewrites, env), and it
+breaks by silently reverting the user's change — the same failure mode this
+issue is about, just relocated.
 
-**What a fix has to do.** Reconcile template-owned files into existing snapshots
-without clobbering agent edits. A blanket "re-apply the template on restore"
-re-introduces exactly the regression `restoreFromSnapshot`'s comment warns about.
+**Historical note — the bug that exposed this.** Generated apps rendered but
+never hydrated: HTML and chunks served fine, buttons dead, no console error.
+`next dev` was rejecting the Turbopack HMR WebSocket upgrade
+(`blockCrossSiteDEV` on the upgrade handler,
+`node_modules/next/dist/server/lib/router-server.js:615`) because the browser
+reaches the sandbox at `sb-*.vercel.run` while the dev server booted as
+localhost. Fixed in `3d247ac` by `allowedDevOrigins: ["*.vercel.run"]` in the
+template's `next.config.ts`, where the call-site comment now explains it. The
+sessions stranded on the pre-fix config no longer exist. Two things worth
+keeping from that investigation:
 
-**Note.** Session `cc951e0c`'s VM had the corrected `next.config.ts` written
-directly to its disk during diagnosis, which is how the fix was verified
-(app rendered, habit toggle worked, ring advanced to 33%, hot reload intact).
-That patch is **not** in its DB snapshot, so the next restore reverts it.
+- **Recognizer.** Count React fibers on the sandbox page — a healthy app has
+  dozens, one that never hydrated has ~2 (React attached only to a hoisted
+  `<link>` and Next's devtools portal, never the app tree):
 
-**Dead end, recorded so it isn't retried.** Vercel Sandbox supports WebSockets
-fine — a bare Node WS server on the exposed port accepts a browser connection
-through the public domain and delivers frames (`OPEN @1162ms`, message
-received). The sandbox proxy is not at fault, and switching the preview to
-`next build` + `next start` "fixes" the symptom only by removing the dev
-client entirely — it trades away hot reload to work around a one-line config
-omission. Don't.
+  ```js
+  let n = 0;
+  for (const e of document.querySelectorAll('*')) {
+    if (Object.keys(e).some(k => k.startsWith('__react'))) n++;
+  }
+  ```
+
+- **Dead end, so it isn't retried.** Vercel Sandbox supports WebSockets fine — a
+  bare Node WS server on the exposed port accepts a browser connection through
+  the public domain and delivers frames. The sandbox proxy is not at fault, and
+  switching the preview to `next build` + `next start` "fixes" this class of
+  symptom only by removing the dev client entirely, trading away hot reload.
+  Don't.
 
 ---
 
