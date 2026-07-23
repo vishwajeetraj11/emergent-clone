@@ -87,7 +87,7 @@ Database: this app has its own dedicated Postgres database. Its connection strin
 
 Auth: when the app needs user accounts / login, build REAL database-backed email-and-password auth using better-auth — never a localStorage/cookie mock or a hand-rolled password scheme. Wire it exactly like this:
 - Install the library and its Postgres driver: \`npm install better-auth pg\`.
-- \`lib/auth.ts\`: \`import { betterAuth } from "better-auth"; import { Pool } from "pg"; export const auth = betterAuth({ database: new Pool({ connectionString: process.env.DATABASE_URL }), emailAndPassword: { enabled: true }, secret: process.env.BETTER_AUTH_SECRET });\` — read the secret from process.env.BETTER_AUTH_SECRET (it is already in \`.env.local\`); never hardcode or self-generate one, and do NOT set \`baseURL\` (better-auth infers it from request headers, which is what makes the ephemeral preview URL work).
+- \`lib/auth.ts\`: \`import { betterAuth } from "better-auth"; import { Pool } from "pg"; export const auth = betterAuth({ database: new Pool({ connectionString: process.env.DATABASE_URL }), emailAndPassword: { enabled: true }, secret: process.env.BETTER_AUTH_SECRET, baseURL: process.env.BETTER_AUTH_URL, trustedOrigins: process.env.BETTER_AUTH_URL ? [process.env.BETTER_AUTH_URL] : [] });\` — read the secret from process.env.BETTER_AUTH_SECRET and the app's public origin from process.env.BETTER_AUTH_URL; BOTH are already in \`.env.local\`. Never hardcode or self-generate either. Setting baseURL + trustedOrigins from BETTER_AUTH_URL is REQUIRED: the live preview is served through a proxy, so better-auth's header-inferred origin does not match the external preview URL and every sign-up/sign-in POST fails with "Invalid origin" unless you pin them from this env var.
 - \`app/api/auth/[...all]/route.ts\`: \`import { toNextJsHandler } from "better-auth/next-js"; import { auth } from "@/lib/auth"; export const { POST, GET } = toNextJsHandler(auth);\`
 - \`lib/auth-client.ts\`: \`import { createAuthClient } from "better-auth/react"; export const { signIn, signUp, signOut, useSession } = createAuthClient();\` — use these in your login/register UI.
 - Create the auth tables by running \`npx @better-auth/cli migrate --y\` via Bash as part of the build (it reads lib/auth.ts and creates the user/session/account tables in DATABASE_URL). Skipping this makes the first signup fail with a 500.
@@ -96,7 +96,7 @@ Auth: when the app needs user accounts / login, build REAL database-backed email
 
 export const REVIEW_DB_NOTE = `
 
-Note: a \`.env.local\` containing DATABASE_URL (and, for apps with auth, BETTER_AUTH_SECRET / AUTH_SECRET) in the working directory is expected platform infrastructure (the app's own Postgres database + auth signing secret) — its presence is not a finding, and code using process.env.DATABASE_URL / process.env.BETTER_AUTH_SECRET server-side is correct. Never print that file's contents.`;
+Note: a \`.env.local\` containing DATABASE_URL (and, for apps with auth, BETTER_AUTH_SECRET / AUTH_SECRET / BETTER_AUTH_URL) in the working directory is expected platform infrastructure (the app's own Postgres database, auth signing secret, and public preview origin) — its presence is not a finding, and code using process.env.DATABASE_URL / process.env.BETTER_AUTH_SECRET / process.env.BETTER_AUTH_URL server-side is correct. Never print that file's contents.`;
 
 /** Appends `note` when the per-app database integration is active. */
 export function dbAware(prompt: string, note: string): string {
