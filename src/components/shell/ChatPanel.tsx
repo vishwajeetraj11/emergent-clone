@@ -3,12 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
-  GitFork,
   Globe,
-  History,
   Mic,
   MessageSquareDashed,
-  Paperclip,
   Rocket,
   Square,
 } from "lucide-react";
@@ -35,99 +32,6 @@ import { cn } from "@/lib/utils";
 import type { AnswerItem, JobStatus, TimelineEvent } from "@/lib/types";
 import type { DeployState, SaveState } from "@/lib/hooks/useAgentSession";
 import { loadUserApiKeys, type UserApiKeys } from "@/lib/user-keys-storage";
-
-interface SessionSummary {
-  id: string;
-  parentSessionId: string | null;
-  createdAt: string;
-  job: { id: string; status: JobStatus } | null;
-}
-
-/**
- * Dropdown listing every session under the current project (original +
- * every fork) — without this, forkSession's newest-session-wins behavior
- * (see getProjectDetail in src/server/projects.ts) makes older forks
- * permanently unreachable through the UI. Fetches the list lazily (only
- * once opened), same pattern as TopBar's credit-balance fetch. Deliberately
- * explicit that forks are one-way copies, not real branches: there is no
- * merge-back in this app (see forkSession's doc comment) — the footer note
- * exists so users don't discover that the hard way after diverging both
- * sides.
- */
-function SessionSwitcher({
-  projectId,
-  currentSessionId,
-  onSwitch,
-}: {
-  projectId: string | null;
-  currentSessionId?: string | null;
-  onSwitch: (sessionId: string, job: { id: string; status: JobStatus } | null) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
-
-  useEffect(() => {
-    if (!open || !projectId) return;
-    let cancelled = false;
-    fetch(`/api/projects/${projectId}/sessions`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { sessions?: SessionSummary[] } | null) => {
-        if (!cancelled && data?.sessions) setSessions(data.sessions);
-      })
-      .catch(() => {
-        // Best-effort — dropdown just shows "Loading…" indefinitely on failure.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, projectId]);
-
-  return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger
-        aria-label="Switch version"
-        title="Switch version"
-        disabled={!projectId}
-        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-      >
-        <History className="size-4" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-64">
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>Versions</DropdownMenuLabel>
-          {sessions === null ? (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">Loading…</div>
-          ) : sessions.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">No versions yet</div>
-          ) : (
-            sessions.map((s) => (
-              <DropdownMenuItem
-                key={s.id}
-                onClick={() => onSwitch(s.id, s.job)}
-                className={cn(
-                  "flex flex-col items-start gap-0.5",
-                  s.id === currentSessionId && "bg-secondary/60"
-                )}
-              >
-                <span className="text-xs font-medium">
-                  {s.parentSessionId ? "Fork" : "Original"}
-                  {s.id === currentSessionId ? " (current)" : ""}
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {new Date(s.createdAt).toLocaleString()}
-                </span>
-              </DropdownMenuItem>
-            ))
-          )}
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <div className="px-2 py-1.5 text-[10px] text-muted-foreground">
-          Forks are independent copies — they can&apos;t be merged back automatically.
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
 
 interface DeploymentSummary {
   id: string;
@@ -400,8 +304,6 @@ export function ChatPanel({
   error,
   hasProject,
   sessionId,
-  projectId = null,
-  isForking = false,
   isSendingMessage = false,
   saveState = "idle",
   saveMessage = null,
@@ -414,8 +316,6 @@ export function ChatPanel({
   onPlanDecision,
   onStop,
   onContinueChat,
-  onFork,
-  onSwitchSession,
   onSave,
   onDeploy,
 }: {
@@ -679,31 +579,12 @@ export function ChatPanel({
           />
           <div className="flex items-center justify-between pt-1">
             <div className="flex items-center gap-0.5">
-              {/* No onClick on purpose — attachments aren't built yet. Kept
-                  hoverable (not `disabled`) so the tooltip can say why. */}
-              <IconAction
-                icon={<Paperclip className="size-4 opacity-40" />}
-                label="Attachments — coming soon"
-              />
               <IconAction
                 icon={<GithubIcon className="size-4" />}
                 label="Save"
                 onClick={onSave}
                 disabled={!hasProject || !onSave || saveState === "saving"}
               />
-              <IconAction
-                icon={<GitFork className="size-4" />}
-                label="Fork"
-                onClick={onFork}
-                disabled={!hasProject || !onFork || isForking}
-              />
-              {onSwitchSession && (
-                <SessionSwitcher
-                  projectId={projectId}
-                  currentSessionId={sessionId}
-                  onSwitch={onSwitchSession}
-                />
-              )}
               <IconAction
                 icon={<Rocket className="size-4" />}
                 label="Deploy a new version"
