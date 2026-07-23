@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { and, eq, inArray } from "drizzle-orm";
+import type { Sandbox } from "@vercel/sandbox";
 import { getDb } from "@/db";
 import { files } from "@/db/schema";
 import {
@@ -12,33 +12,35 @@ import {
 } from "@/server/r2";
 
 // ---------------------------------------------------------------------------
-// Directory snapshot -> `files` table INDEX + Cloudflare R2 bytes, used by the
-// Phase 2 build phase (src/server/agent.ts) after the build query() completes,
-// and read back by GET /api/sessions/[id]/files for the timeline's file
-// viewer.
+// Sandbox snapshot -> `files` table INDEX + Cloudflare R2 bytes, used by the
+// build phase (src/server/agent-phases.ts) after the build/debug agent edits
+// the VM, and read back by GET /api/sessions/[id]/files for the file viewer.
+//
+// The agent builds INSIDE the session's Vercel sandbox (see
+// src/server/agent-tools.ts), so snapshotSessionFiles reads the file tree from
+// that live VM (find + readFileToBuffer), not the emergent server's disk.
 //
 // "R2 = bytes, DB = index" (see src/server/r2.ts + the files-table comment in
 // src/db/schema.ts): a changed file's bytes go to R2 under
 // sessions/<sessionId>/<path>, its row stores only {path, hash}. R2 is
 // REQUIRED — putTextObject/getTextObject throw when it's unconfigured, so a
-// build without R2 fails loudly at snapshot time rather than silently losing
-// files. getSessionFiles hydrates the bytes back into the SessionFile
+// build without R2 fails loudly rather than silently losing files.
+// getSessionFiles hydrates the bytes back into the SessionFile
 // { path, content, updatedAt } contract, so its consumers are unchanged.
 // ---------------------------------------------------------------------------
 
-const EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next", ".turbo"]);
+// The sandbox's working directory (matches APP_DIR in agent-tools.ts).
+const APP_DIR = "/vercel/sandbox";
 
-// Secret-bearing env files never leave the sandbox directory: the session's
-// own DATABASE_URL lives in `.env.local` (written by src/server/project-db.ts,
-// regenerated on every sandbox start), and the `files` table feeds the file
-// viewer, GitHub export, Vercel deploys, and fork copies — none of which may
-// carry a live connection string.
+// Secret-bearing env files never leave the sandbox: the session's own
+// DATABASE_URL lives in `.env.local` (written by src/server/project-db.ts),
+// and the `files` table feeds the file viewer, GitHub export, Vercel deploys,
+// and fork copies — none of which may carry a live connection string.
 const EXCLUDED_FILES = new Set([".env", ".env.local"]);
 
-// Best-effort binary skip list, in addition to the excluded dirs above — file
-// content is stored/transferred as text (DB text column or R2 utf-8 object),
-// so we don't want to jam raw binary bytes (mangled by the utf8 decode) into
-// it.
+// Best-effort binary skip list — file content is stored/transferred as text
+// (R2 utf-8 object), so we don't want to jam raw binary bytes (mangled by the
+// utf8 decode) into it.
 const BINARY_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -58,27 +60,32 @@ const BINARY_EXTENSIONS = new Set([
 // snapshotting something huge (e.g. a stray lockfile-like artifact).
 const MAX_FILE_BYTES = 512 * 1024;
 
-// Bounded fan-out for R2 PUT/GET/COPY — enough to hide per-object latency
+// Bounded fan-out for R2 + VM reads — enough to hide per-object latency
 // without opening a socket per file on a large project.
 const IO_CONCURRENCY = 8;
 
-function walk(dir: string, baseDir: string, out: string[]): void {
-  let entries: import("node:fs").Dirent[];
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (EXCLUDED_DIRS.has(entry.name)) continue;
-      walk(path.join(dir, entry.name), baseDir, out);
-    } else if (entry.isFile()) {
-      if (EXCLUDED_FILES.has(entry.name)) continue;
-      if (BINARY_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
-      out.push(path.relative(baseDir, path.join(dir, entry.name)));
-    }
-  }
+/** Lists the relative paths of source files in the sandbox (excluding
+ * regenerable dirs, secret env files, and binaries). */
+async function listSandboxFiles(sandbox: Sandbox): Promise<string[]> {
+  const res = await sandbox.runCommand({
+    cmd: "sh",
+    args: [
+      "-c",
+      "find . -type f -not -path './node_modules/*' -not -path './.git/*' -not -path './.next/*' -not -path './.turbo/*'",
+    ],
+    cwd: APP_DIR,
+  });
+  if (res.exitCode !== 0) return [];
+  const listing = await res.output("stdout");
+  return listing
+    .split("\n")
+    .map((l) => l.trim().replace(/^\.\//, ""))
+    .filter((p) => {
+      if (!p) return false;
+      if (EXCLUDED_FILES.has(path.posix.basename(p))) return false;
+      if (BINARY_EXTENSIONS.has(path.posix.extname(p).toLowerCase())) return false;
+      return true;
+    });
 }
 
 export interface SessionFile {
@@ -98,33 +105,28 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 /**
- * Snapshots `dir` recursively (excluding node_modules/.git/.next/.turbo),
- * PUTs every changed file's bytes to R2, and upserts its index row {path,
- * hash} keyed by (session_id, path). Diff is by sha256. Files that have
- * vanished from disk since the last snapshot have their rows (and R2 objects)
- * deleted. Returns the list of changed relative paths that were WRITTEN —
- * vanished paths are NOT included (callers, e.g. syncChangedFilesToSandbox,
- * re-read every returned path from disk, so a deleted path in the return value
- * would ENOENT).
+ * Snapshots the session's live Vercel `sandbox` file tree (excluding
+ * node_modules/.git/.next/.turbo), PUTs every changed file's bytes to R2, and
+ * upserts its index row {path, hash} keyed by (session_id, path). Diff is by
+ * sha256. Files that have vanished since the last snapshot have their rows
+ * (and R2 objects) deleted. Returns the list of changed relative paths that
+ * were WRITTEN — vanished paths are NOT included.
  *
  * R2 is required: a changed file's putTextObject throws when R2 is
  * unconfigured, failing the whole snapshot (and the build) loudly rather than
  * persisting an index row with no bytes behind it.
  *
- * NB every caller (src/server/agent-phases.ts) passes the FULL sandbox dir, so
- * the vanished-set is always computed against a complete tree — restore/fork
- * never snapshot, so they can't trigger a spurious wipe. One consequence:
+ * The vanished-set is computed against the full VM listing, so restore/fork
+ * (which don't snapshot) can't trigger a spurious wipe. One consequence:
  * restore no longer resurrects files the agent deleted in a later pass.
  */
 export async function snapshotSessionFiles(
   sessionId: string,
-  dir: string
+  sandbox: Sandbox
 ): Promise<string[]> {
-  if (!existsSync(dir)) return [];
   const db = getDb();
 
-  const relPaths: string[] = [];
-  walk(dir, dir, relPaths);
+  const relPaths = await listSandboxFiles(sandbox);
 
   const existing = await db
     .select({ path: files.path, hash: files.hash })
@@ -132,26 +134,27 @@ export async function snapshotSessionFiles(
     .where(eq(files.sessionId, sessionId));
   const existingByPath = new Map(existing.map((f) => [f.path, f.hash]));
 
-  // Gather the files whose content actually changed (read + hash), skipping
-  // unreadable/oversized ones. Do this before any writes so the write fan-out
-  // below is a clean chunked pass.
+  // Read + hash the files whose content actually changed, skipping
+  // unreadable/oversized ones, before the write fan-out. Reads run in bounded
+  // chunks (each is a VM round-trip).
   const toWrite: { relPath: string; content: string; hash: string }[] = [];
-  for (const relPath of relPaths) {
-    const fullPath = path.join(dir, relPath);
-    let content: string;
-    try {
-      const stat = statSync(fullPath);
-      if (stat.size > MAX_FILE_BYTES) continue;
-      content = readFileSync(fullPath, "utf8");
-    } catch {
-      // Unreadable, or raced with a concurrent write/delete — skip this pass,
-      // it'll be picked up on the next snapshot if it settles.
-      continue;
-    }
-
-    const hash = sha256hex(content);
-    if (existingByPath.get(relPath) === hash) continue; // unchanged
-    toWrite.push({ relPath, content, hash });
+  for (const group of chunk(relPaths, IO_CONCURRENCY)) {
+    await Promise.all(
+      group.map(async (relPath) => {
+        let content: string;
+        try {
+          const buf = await sandbox.readFileToBuffer({ path: `${APP_DIR}/${relPath}` });
+          if (buf == null || buf.length > MAX_FILE_BYTES) return;
+          content = buf.toString("utf8");
+        } catch {
+          // Unreadable / raced with a concurrent write — skip this pass.
+          return;
+        }
+        const hash = sha256hex(content);
+        if (existingByPath.get(relPath) === hash) return; // unchanged
+        toWrite.push({ relPath, content, hash });
+      })
+    );
   }
 
   const changed: string[] = [];

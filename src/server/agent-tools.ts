@@ -1,32 +1,32 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { tool } from "ai";
 import { z } from "zod";
-import { glob as tinyGlob } from "tinyglobby";
+import type { Sandbox } from "@vercel/sandbox";
 import type { AnswerItem, Question } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // The agent tool belt for the AI SDK runtime (src/server/llm.ts).
 //
-// Under the old Claude Agent SDK, the `claude` CLI subprocess executed
-// Bash/Read/Write/Edit/Glob/Grep itself. The AI SDK has no execution
-// environment — every tool below runs in THIS Node process via `execute`,
-// scoped to the phase's working directory. Two hardenings the CLI never had:
-//   - file tools refuse paths that resolve outside `cwd` (same containment
-//     check as writeSnapshotFiles in src/server/sandbox.ts). Bash remains a
-//     soft boundary (same accepted residual risk as before — single-user
-//     local tool, documented in agent.ts's header).
-//   - bash gets a curated env, not process.env — the platform's own secrets
-//     (ANTHROPIC/OPENAI keys, platform DATABASE_URL, GitHub/Stripe/Neon…)
-//     are no longer inherited by agent-run shell commands.
+// Every tool below runs INSIDE the session's Vercel sandbox (the same VM that
+// serves the preview) via the @vercel/sandbox API — runCommand for shell,
+// readFileToBuffer/writeFiles for files — NOT on the emergent server's local
+// disk. The agent edits the exact filesystem the dev server runs, so there is
+// no local working dir and no sync step. Two hardenings:
+//   - file tools refuse paths that resolve outside the sandbox app dir
+//     (APP_DIR). Bash remains a soft boundary (the sandbox is the isolation).
+//   - bash inherits only the VM's own environment; the emergent platform's
+//     secrets never cross into the box (they live only in the server process).
 //
 // Tool failures return error strings rather than throwing: the AI SDK relays
 // a returned string straight back to the model, which is exactly what a
 // coding agent needs to self-correct ("file not found", "old_string not
 // unique", …).
 // ---------------------------------------------------------------------------
+
+// The sandbox's working directory — @vercel/sandbox writeFiles/runCommand
+// default here, and the app (package.json, next dev) is seeded/run here.
+const APP_DIR = "/vercel/sandbox";
 
 const BASH_TIMEOUT_MS = 120_000;
 const MAX_TOOL_OUTPUT_CHARS = 30_000;
@@ -36,53 +36,67 @@ function tailCap(text: string, cap = MAX_TOOL_OUTPUT_CHARS): string {
   return text.length > cap ? `…(truncated)…\n${text.slice(-cap)}` : text;
 }
 
-/** Resolves `relPath` inside `cwd`, or null if it would escape it. */
-function resolveInside(cwd: string, relPath: string): string | null {
-  const root = path.resolve(cwd);
-  const full = path.resolve(root, relPath);
-  if (full !== root && !full.startsWith(root + path.sep)) return null;
+/** Resolves `relPath` to an absolute path inside APP_DIR, or null if it would
+ * escape it. Uses posix (the sandbox is Linux) regardless of the server's OS. */
+function resolveInside(relPath: string): string | null {
+  const root = APP_DIR;
+  const full = path.posix.resolve(root, relPath);
+  if (full !== root && !full.startsWith(root + "/")) return null;
   return full;
 }
 
-/** Minimal env for agent bash commands — see module doc comment. */
-function toolEnv(): NodeJS.ProcessEnv {
-  const { PATH, HOME, TMPDIR, USER, SHELL, LANG, LC_ALL, NODE_ENV } = process.env;
-  return { PATH, HOME, TMPDIR, USER, SHELL, LANG, LC_ALL, NODE_ENV };
+/** Minimal glob -> anchored regex (supports **, *, ?). Used to match a find
+ * listing from the sandbox server-side, since there's no local fs to glob. */
+function globToRegex(glob: string): RegExp {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        if (glob[i + 2] === "/") {
+          re += "(?:.*/)?";
+          i += 2;
+        } else {
+          re += ".*";
+          i += 1;
+        }
+      } else {
+        re += "[^/]*";
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else if ("\\^$.|+()[]{}".includes(c)) {
+      re += "\\" + c;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp("^" + re + "$");
 }
 
-function runBash(command: string, cwd: string, timeoutMs: number): Promise<string> {
-  return new Promise((resolve) => {
-    const child = spawn("sh", ["-c", command], { cwd, env: toolEnv() });
-    let out = "";
-    let settled = false;
-    const finish = (text: string) => {
-      if (settled) return;
-      settled = true;
-      resolve(text);
-    };
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(`${tailCap(out)}\n(command timed out after ${Math.round(timeoutMs / 1000)}s)`);
-    }, timeoutMs);
-    child.stdout?.on("data", (d: Buffer) => (out += d.toString("utf8")));
-    child.stderr?.on("data", (d: Buffer) => (out += d.toString("utf8")));
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      finish(`Failed to run command: ${err.message}`);
+/** Run a shell command in the sandbox and return capped combined output + a
+ * non-zero exit note (never throws — infra errors become an error string). */
+async function runVmBash(sandbox: Sandbox, command: string, timeoutMs: number): Promise<string> {
+  try {
+    const res = await sandbox.runCommand({
+      cmd: "sh",
+      args: ["-c", command],
+      cwd: APP_DIR,
+      timeoutMs,
     });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      finish(`${tailCap(out)}${code === 0 ? "" : `\n(exit code ${code})`}`);
-    });
-  });
+    const out = await res.output("both");
+    return `${tailCap(out)}${res.exitCode === 0 ? "" : `\n(exit code ${res.exitCode})`}`;
+  } catch (err) {
+    return `Failed to run command: ${err instanceof Error ? err.message : String(err)}`;
+  }
 }
 
 /**
- * The build/review/debug file+shell toolset, scoped to `cwd`. Names match
- * the old CLI tool names (lowercased) so existing prompt language ("use
- * Bash", "Read the file") still lands on the obvious tool.
+ * The build/review/debug file+shell toolset, executing inside the session's
+ * Vercel `sandbox`. Names match the old CLI tool names (lowercased) so
+ * existing prompt language ("use Bash", "Read the file") still lands.
  */
-export function buildFileTools(cwd: string) {
+export function buildFileTools(sandbox: Sandbox) {
   return {
     bash: tool({
       description:
@@ -98,18 +112,19 @@ export function buildFileTools(cwd: string) {
           .describe("Optional timeout in seconds (default 120)"),
       }),
       execute: async ({ command, timeout_seconds }) =>
-        runBash(command, cwd, (timeout_seconds ?? BASH_TIMEOUT_MS / 1000) * 1000),
+        runVmBash(sandbox, command, (timeout_seconds ?? BASH_TIMEOUT_MS / 1000) * 1000),
     }),
 
     read: tool({
       description: "Read a text file (path relative to the working directory).",
       inputSchema: z.object({ file_path: z.string().min(1) }),
       execute: async ({ file_path }) => {
-        const full = resolveInside(cwd, file_path);
+        const full = resolveInside(file_path);
         if (!full) return "Error: path escapes the working directory.";
-        if (!existsSync(full)) return `Error: ${file_path} does not exist.`;
         try {
-          const content = readFileSync(full, "utf8");
+          const buf = await sandbox.readFileToBuffer({ path: full });
+          if (buf == null) return `Error: ${file_path} does not exist.`;
+          const content = buf.toString("utf8");
           return content.length > MAX_READ_CHARS
             ? `${content.slice(0, MAX_READ_CHARS)}\n…(truncated — file is ${content.length} chars)`
             : content;
@@ -127,11 +142,12 @@ export function buildFileTools(cwd: string) {
         content: z.string(),
       }),
       execute: async ({ file_path, content }) => {
-        const full = resolveInside(cwd, file_path);
+        const full = resolveInside(file_path);
         if (!full) return "Error: path escapes the working directory.";
         try {
-          mkdirSync(path.dirname(full), { recursive: true });
-          writeFileSync(full, content, "utf8");
+          const dir = path.posix.dirname(full);
+          if (dir && dir !== APP_DIR) await sandbox.mkDir(dir).catch(() => {});
+          await sandbox.writeFiles([{ path: full, content }]);
           return `Wrote ${file_path} (${content.length} chars).`;
         } catch (err) {
           return `Error writing ${file_path}: ${err instanceof Error ? err.message : String(err)}`;
@@ -148,17 +164,18 @@ export function buildFileTools(cwd: string) {
         new_string: z.string(),
       }),
       execute: async ({ file_path, old_string, new_string }) => {
-        const full = resolveInside(cwd, file_path);
+        const full = resolveInside(file_path);
         if (!full) return "Error: path escapes the working directory.";
-        if (!existsSync(full)) return `Error: ${file_path} does not exist.`;
         try {
-          const content = readFileSync(full, "utf8");
+          const buf = await sandbox.readFileToBuffer({ path: full });
+          if (buf == null) return `Error: ${file_path} does not exist.`;
+          const content = buf.toString("utf8");
           const first = content.indexOf(old_string);
           if (first === -1) return `Error: old_string not found in ${file_path}.`;
           if (content.indexOf(old_string, first + 1) !== -1) {
             return `Error: old_string occurs more than once in ${file_path} — add more surrounding context to make it unique.`;
           }
-          writeFileSync(full, content.replace(old_string, new_string), "utf8");
+          await sandbox.writeFiles([{ path: full, content: content.replace(old_string, new_string) }]);
           return `Edited ${file_path}.`;
         } catch (err) {
           return `Error editing ${file_path}: ${err instanceof Error ? err.message : String(err)}`;
@@ -171,17 +188,19 @@ export function buildFileTools(cwd: string) {
         'Find files by glob pattern (e.g. "app/**/*.tsx"), relative to the working directory. node_modules/.next/.git are always excluded.',
       inputSchema: z.object({ pattern: z.string().min(1) }),
       execute: async ({ pattern }) => {
-        try {
-          const matches = await tinyGlob(pattern, {
-            cwd,
-            ignore: ["**/node_modules/**", "**/.next/**", "**/.git/**", "**/.turbo/**"],
-            onlyFiles: true,
-          });
-          if (matches.length === 0) return "No files matched.";
-          return tailCap(matches.sort().slice(0, 500).join("\n"));
-        } catch (err) {
-          return `Error globbing: ${err instanceof Error ? err.message : String(err)}`;
-        }
+        const listing = await runVmBash(
+          sandbox,
+          "find . -type f -not -path './node_modules/*' -not -path './.next/*' -not -path './.git/*' -not -path './.turbo/*'",
+          30_000
+        );
+        const re = globToRegex(pattern);
+        const matches = listing
+          .split("\n")
+          .map((l) => l.trim().replace(/^\.\//, ""))
+          .filter((p) => p && !p.startsWith("(") && re.test(p))
+          .sort()
+          .slice(0, 500);
+        return matches.length ? tailCap(matches.join("\n")) : "No files matched.";
       },
     }),
 
@@ -193,12 +212,13 @@ export function buildFileTools(cwd: string) {
         path: z.string().optional().describe("Subdirectory or file to search (default: whole working directory)"),
       }),
       execute: async ({ pattern, path: subPath }) => {
-        const target = subPath ? resolveInside(cwd, subPath) : cwd;
+        const target = subPath ? resolveInside(subPath) : APP_DIR;
         if (!target) return "Error: path escapes the working directory.";
-        // -I skips binary files; grep exits 1 on "no matches", which runBash
-        // reports as an exit-code note the model can read as "not found".
-        const cmd = `grep -rnIE --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=.git --exclude-dir=.turbo -e ${JSON.stringify(pattern)} ${JSON.stringify(path.relative(cwd, target) || ".")}`;
-        const out = await runBash(cmd, cwd, 30_000);
+        const rel = target === APP_DIR ? "." : path.posix.relative(APP_DIR, target) || ".";
+        // -I skips binary files; grep exits 1 on "no matches", surfaced as an
+        // exit-code note the model reads as "not found".
+        const cmd = `grep -rnIE --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=.git --exclude-dir=.turbo -e ${JSON.stringify(pattern)} ${JSON.stringify(rel)}`;
+        const out = await runVmBash(sandbox, cmd, 30_000);
         return out.trim() === "(exit code 1)" || out.trim() === "" ? "No matches." : out;
       },
     }),

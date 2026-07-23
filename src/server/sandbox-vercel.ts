@@ -18,6 +18,18 @@ import { probeUrl, waitForUrlReady } from "@/server/sandbox-vercel-net";
 import { registry, startingPromises } from "@/server/sandbox-vercel-registry";
 import { readTemplateFilesRecursive } from "@/server/sandbox-vercel-template";
 
+/**
+ * The live Sandbox handle for a running session (registry lookup), or null.
+ * The build phase (src/server/agent-phases.ts) uses this after start() so the
+ * AI-SDK agent's file/shell tools + snapshotSessionFiles run INSIDE the VM.
+ * Returns a handle only when the sandbox is actually running — same trust
+ * condition as syncFiles.
+ */
+export function getLiveSandbox(sessionId: string): Sandbox | null {
+  const entry = registry.get(sessionId);
+  return entry?.state === "running" && entry.sandbox ? entry.sandbox : null;
+}
+
 // ---------------------------------------------------------------------------
 // VercelSandboxProvider: runs the generated app's `npm install` + dev server
 // inside a real Vercel Sandbox (Firecracker microVM) instead of directly on
