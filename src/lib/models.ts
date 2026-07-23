@@ -27,6 +27,7 @@ export const MODEL_CATALOG: ModelInfo[] = [
   // runtime; Claude is metered API-only here).
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", provider: "anthropic", tier: "planner" },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", provider: "anthropic", tier: "builder" },
+  { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", provider: "anthropic", tier: "builder" },
   // OpenAI — GPT-5.6 tier trio (verified against OpenAI's pricing page):
   // sol = flagship, terra = mid, luna = small/cheap.
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai", tier: "builder" },

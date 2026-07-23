@@ -45,6 +45,8 @@ const MODEL_PRICING: Record<string, ModelRate> = {
   "claude-sonnet-5": { inputPerMillionUsd: 3.0, outputPerMillionUsd: 15.0 },
   // Claude Opus 4.8 standard pricing: $5.00 / $25.00 per 1,000,000 tokens.
   "claude-opus-4-8": { inputPerMillionUsd: 5.0, outputPerMillionUsd: 25.0 },
+  // Claude Haiku 4.5 standard pricing: $1.00 / $5.00 per 1,000,000 tokens.
+  "claude-haiku-4-5-20251001": { inputPerMillionUsd: 1.0, outputPerMillionUsd: 5.0 },
   // GPT-5.6 tiers — verified against OpenAI's pricing page (July 2026):
   // sol $5/$0.50-cached/$30, terra $2.50/$0.25/$15, luna $1/$0.10/$6.
   "gpt-5.6-sol": { inputPerMillionUsd: 5.0, outputPerMillionUsd: 30.0, cachedInputPerMillionUsd: 0.5 },
