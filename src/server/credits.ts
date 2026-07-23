@@ -117,8 +117,8 @@ async function getJobOwnerUserId(jobId: string): Promise<string | null> {
 /**
  * Debits a job's owner for one usage event's token cost — called from
  * src/server/agent.ts immediately after it appends a `usage` event (every
- * query() call in the plan/build/review/debug pipeline calls this once
- * each, passing whichever model actually ran that call). Never throws on a
+ * agent call in the plan/build/review/debug pipeline calls this once each,
+ * passing whichever model actually ran that call). Never throws on a
  * missing owner (an orphaned/deleted job) — just does nothing, since there's
  * no one to debit.
  */

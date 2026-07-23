@@ -59,12 +59,10 @@ function formatProjectContextBlock(
 // ---------------------------------------------------------------------------
 
 /**
- * The build query() call: real Bash/Read/Write/Edit/Glob/Grep tools, `cwd`'d
- * into the real sandbox directory (not the planning phase's throwaway
- * scratch dir). `ask_user` stays registered (not required) in case the
- * model genuinely needs to ask something planning didn't cover — see the
- * residual-risk note at the top of this file re: `cwd` not being a hard
- * filesystem jail.
+ * The build agent call: real Bash/Read/Write/Edit/Glob/Grep tools, all
+ * executing inside the session's sandbox VM (src/server/agent-tools.ts).
+ * `ask_user` stays registered (not required) in case the model genuinely needs
+ * to ask something planning didn't cover.
  */
 async function runBuildQuery(
   jobId: string,
@@ -260,7 +258,7 @@ async function runReviewAndDebugTail(
 
 /**
  * Starts the session's sandbox (template seed + npm install + `npm run dev`,
- * see src/server/sandbox.ts), runs the real build query() against it, runs
+ * see src/server/sandbox-vercel.ts), runs the real build against it, runs
  * the review(+debug) tail, then snapshots the sandbox directory into the
  * `files` table. Owns the job's terminal status (done/failed) from this
  * point on.

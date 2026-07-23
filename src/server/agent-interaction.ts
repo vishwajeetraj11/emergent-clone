@@ -48,9 +48,8 @@ export function countUnansweredQuestions(allEvents: EventRow[]): number {
 /**
  * Polls the events table (same ~800ms polling style as the SSE route) until
  * an `answer` event for this toolUseId appears, or the job is stopped out
- * from under us. Runs *inside* the ask_user tool handler, so the SDK's
- * query() call — and the underlying `claude` CLI process — stays alive for
- * the whole wait.
+ * from under us. Runs *inside* the ask_user tool handler, so the agent call
+ * stays alive for the whole wait.
  */
 export async function waitForAnswer(
   jobId: string,

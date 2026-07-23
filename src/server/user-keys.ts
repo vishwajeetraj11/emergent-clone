@@ -12,7 +12,7 @@
 // SECURITY CONTRACT: a value stored here must never reach the DB, an
 // `appendEvent` payload, `console.*`, or any API response — this store exists
 // ONLY so the AI SDK runtime can pick it up while resolving a model for that
-// job's own query() calls. It never touches the sandbox VM (no writeFiles,
+// job's own agent calls. It never touches the sandbox VM (no writeFiles,
 // no env changes there — the sandbox is out of scope for this feature
 // entirely). The map is plain process memory keyed by jobId, nothing more:
 // a server restart mid-job silently degrades that job back to platform keys

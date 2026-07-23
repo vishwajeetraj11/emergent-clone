@@ -1,6 +1,3 @@
-import { mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { appendEvent, getAllEvents } from "@/server/events";
 import { getJob, setJobStatus } from "@/server/jobs";
@@ -38,9 +35,8 @@ import { getJobApiKeys, clearJobApiKeys } from "@/server/user-keys";
 // A "revise" decision loops back into another planner call with the user's
 // feedback folded in, capped at MAX_PLAN_REVISIONS.
 //
-// BUILD: unchanged mechanically from before — the builder (claude-sonnet-5)
-// gets real Bash/Read/Write/Edit/Glob/Grep, `cwd`'d into the session's
-// sandbox.
+// BUILD: the builder (claude-sonnet-5) gets real Bash/Read/Write/Edit/Glob/
+// Grep, all executing inside the session's sandbox VM.
 //
 // REVIEW + DEBUG (new): once the builder finishes, a review pass (also
 // claude-sonnet-5 — Opus is reserved for planning only, confirmed) reads the
@@ -72,12 +68,10 @@ import { getJobApiKeys, clearJobApiKeys } from "@/server/user-keys";
 // orphans — an accepted limitation (documented in src/server/jobs.ts), and
 // the same applies to a job parked in waitForPlanDecision.
 //
-// KNOWN RESIDUAL RISK (build/review/debug, accepted — not solved here): the
-// query's `cwd` scopes where its Bash tool *starts*, not a hard filesystem
-// jail. The model could `cd` or use an absolute path to touch things outside
-// the sandbox directory. This is a single-user local dev tool, not a
-// multi-tenant production sandbox, so a real jail (container/chroot) is out
-// of scope for this phase.
+// ISOLATION: every build/review/debug tool call runs inside the session's
+// Vercel sandbox VM, not on this host — see src/server/agent-tools.ts, which
+// owns the boundary (file tools reject paths outside APP_DIR; Bash is a soft
+// boundary, and the VM itself is the hard one).
 //
 // MOCK MODE: if MOCK_AGENT=1, we run a scripted trajectory with identical
 // event shapes (including a scripted plan step) so the whole system is
@@ -130,15 +124,8 @@ async function handleAgentError(jobId: string, err: unknown) {
 }
 
 // ---------------------------------------------------------------------------
-// Real trajectory (Claude Agent SDK, local `claude` CLI auth)
+// Real trajectory (AI SDK — see src/server/llm.ts's runAgentQuery)
 // ---------------------------------------------------------------------------
-
-/** Per-job scratch directory used as the planning query's `cwd` — never the real project root. */
-function ensureJobScratchDir(jobId: string): string {
-  const dir = join(tmpdir(), "emergent-agent-jobs", jobId);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
 
 // ---------------------------------------------------------------------------
 // Planning phase (claude-opus-4-8): ask_user Q&A (first pass only, unless
@@ -153,7 +140,6 @@ interface PlanQueryResult {
 /** One planner run — either the initial scoping pass or a single revision pass. The ask_user tool is the ONLY tool available. */
 async function runPlanQuery(
   jobId: string,
-  _cwd: string,
   systemPrompt: string,
   userPrompt: string
 ): Promise<PlanQueryResult> {
@@ -239,7 +225,6 @@ async function waitForPlanDecision(
  */
 async function runPlanningPhase(
   jobId: string,
-  cwd: string,
   initialSystemPrompt: string,
   initialUserPrompt: string,
   requireAskUserFirstPass: boolean
@@ -250,7 +235,7 @@ async function runPlanningPhase(
   let requireAskUser = requireAskUserFirstPass;
 
   while (true) {
-    const result = await runPlanQuery(jobId, cwd, systemPrompt, userPrompt);
+    const result = await runPlanQuery(jobId, systemPrompt, userPrompt);
     if (await isStopped(jobId)) return null;
     if (!result.planText) return null; // failure already recorded by runPlanQuery
 
@@ -316,11 +301,11 @@ Write a revised plan.`;
 }
 
 /**
- * Second, short query() call for the closing (plan -> build transition)
- * summary — same tool-restricted, filesystem-isolated configuration as the
- * planning query, but with no tools at all (not even ask_user). Runs on the
- * planner model since it's narrating the plan, not writing code. Does not
- * set job status; the build phase that follows owns the terminal status.
+ * Second, short agent call for the closing (plan -> build transition) summary
+ * — same configuration as the planning call, but with no tools at all (not
+ * even ask_user). Runs on the planner model since it's narrating the plan, not
+ * writing code. Does not set job status; the build phase that follows owns the
+ * terminal status.
  */
 async function runSummaryQuery(jobId: string): Promise<void> {
   const apiKeys = getJobApiKeys(jobId);
@@ -377,8 +362,7 @@ async function runInitialBuildFlow(
   prompt: string,
   builderModel: string
 ): Promise<void> {
-  const cwd = ensureJobScratchDir(jobId);
-  const planText = await runPlanningPhase(jobId, cwd, SYSTEM_PROMPT, prompt, true);
+  const planText = await runPlanningPhase(jobId, SYSTEM_PROMPT, prompt, true);
   if (planText === null) return;
   if (await isStopped(jobId)) return;
 
@@ -412,10 +396,8 @@ async function runContinuationFlow(
     return;
   }
 
-  const cwd = ensureJobScratchDir(jobId);
   const planText = await runPlanningPhase(
     jobId,
-    cwd,
     CONTINUATION_PLANNING_SYSTEM_PROMPT,
     prompt,
     false
