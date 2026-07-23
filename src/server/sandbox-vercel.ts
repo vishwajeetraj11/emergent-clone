@@ -379,7 +379,7 @@ export class VercelSandboxProvider implements SandboxProvider {
           // sandbox's filesystem (.env.local included) is already sitting on
           // disk from before its last stop().
           try {
-            const envContent = await buildSandboxEnvContent(sessionId);
+            const envContent = await buildSandboxEnvContent(sessionId, sbx.domain(APP_PORT));
             if (envContent) {
               fileList = [
                 ...fileList.filter((f) => f.path !== ".env.local"),
@@ -435,7 +435,7 @@ export class VercelSandboxProvider implements SandboxProvider {
     let envChanged = false;
     if (!created) {
       try {
-        const desired = await buildSandboxEnvContent(sessionId);
+        const desired = await buildSandboxEnvContent(sessionId, sandbox.domain(APP_PORT));
         if (desired) {
           const current = await sandbox
             .runCommand({ cmd: "cat", args: [".env.local"] })

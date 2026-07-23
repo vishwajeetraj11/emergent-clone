@@ -229,8 +229,21 @@ export async function ensureSessionAuthSecret(sessionId: string): Promise<string
  * (the name better-auth reads) and AUTH_SECRET (a harmless alias that
  * future-proofs a hand-roll or an Auth.js fallback without touching this
  * helper). Both carry the same value from ensureSessionAuthSecret.
+ *
+ * `appUrl` (the session's live preview origin, e.g. https://sb-xxx.vercel.run —
+ * known to the caller at sandbox start) is emitted as BETTER_AUTH_URL. better-auth
+ * defaults trustedOrigins to [baseURL] and, behind the emergent preview proxy,
+ * its header-inferred baseURL does NOT match the external preview origin — so
+ * a POST from the preview is rejected with "Invalid origin". Pinning baseURL
+ * from this env var (see the generated lib/auth.ts in src/server/agent-prompts.ts)
+ * is what makes login actually work on the ephemeral URL. Omitted (no line) when
+ * the caller doesn't know the URL (e.g. the local-dir writer) — better-auth then
+ * falls back to header inference, which is the previous behavior.
  */
-export async function buildSandboxEnvContent(sessionId: string): Promise<string | null> {
+export async function buildSandboxEnvContent(
+  sessionId: string,
+  appUrl?: string
+): Promise<string | null> {
   const url = await ensureSessionDatabase(sessionId);
   if (!url) return null;
   const secret = await ensureSessionAuthSecret(sessionId);
@@ -240,6 +253,9 @@ export async function buildSandboxEnvContent(sessionId: string): Promise<string 
   ];
   if (secret) {
     lines.push(`BETTER_AUTH_SECRET=${secret}`, `AUTH_SECRET=${secret}`);
+  }
+  if (appUrl) {
+    lines.push(`BETTER_AUTH_URL=${appUrl}`);
   }
   return lines.join("\n") + "\n";
 }
