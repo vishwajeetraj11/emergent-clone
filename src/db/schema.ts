@@ -218,18 +218,14 @@ export const events = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// files — latest snapshot per session (file viewer + GitHub export)
+// files — latest snapshot INDEX per session (file viewer + GitHub export).
 //
-// "R2 = bytes, DB = index" (see src/server/r2.ts): a row is the index entry;
-// the bytes may live either inline (`content`) or in R2 (`hash` set, content
-// null). Row-state invariant — exactly one of these two shapes, never both
-// null:
-//   legacy    : content non-null, hash null   (DB holds the bytes)
-//   R2-backed : content null,     hash set     (bytes in R2, hash = sha256)
-// With no R2_* env configured, every row is written legacy (byte-identical to
-// the pre-R2 behavior); with R2 configured, changed files flip to R2-backed
-// lazily. Both shapes coexist permanently — reads (getSessionFiles) handle
-// each.
+// "R2 = bytes, DB = index" (see src/server/r2.ts): a row is only the index
+// entry {path, hash}; the actual bytes live in Cloudflare R2 under
+// sessions/<sessionId>/<path>, keyed by this row's path. `hash` is the sha256
+// hex of the content (used for change detection). R2 is REQUIRED — there is no
+// DB-inline fallback; a build with R2 unconfigured fails loudly at snapshot
+// time rather than silently persisting nothing.
 // ---------------------------------------------------------------------------
 
 export const files = pgTable(
@@ -240,10 +236,8 @@ export const files = pgTable(
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
     path: text("path").notNull(),
-    // Nullable now: null for R2-backed rows (bytes fetched from R2 by hash).
-    content: text("content"),
-    // sha256 hex of the content for R2-backed rows; null for legacy rows.
-    hash: text("hash"),
+    // sha256 hex of the content; the bytes themselves live in R2 by path.
+    hash: text("hash").notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

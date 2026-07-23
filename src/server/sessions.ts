@@ -6,7 +6,7 @@ import { getSessionFiles } from "@/server/files";
 import { runAgentLoop } from "@/server/agent";
 import { ensureSessionDatabase } from "@/server/project-db";
 import { getSandboxDir, writeSnapshotFiles } from "@/server/sandbox";
-import { copyObject, isR2Configured, sessionFileKey } from "@/server/r2";
+import { copyObject, sessionFileKey } from "@/server/r2";
 import { setJobApiKeys, type UserApiKeys } from "@/server/user-keys";
 import type { JobRow, SessionRow } from "@/server/jobs";
 
@@ -107,42 +107,30 @@ export async function forkSession(sessionId: string): Promise<{
     .values({ projectId: original.projectId, parentSessionId: original.id })
     .returning();
 
-  // Copy the index rows RAW (path/content/hash as-is) rather than from
-  // hydrated content, so an R2-backed original stays R2-backed on the fork
-  // instead of collapsing every file back into a legacy content row.
+  // Copy the index rows {path, hash} to the fork, then copy each file's R2
+  // object into the fork's own key prefix. The DB copy is cheap; the R2 copies
+  // are best-effort per file (a failed copy just means that one file is skipped
+  // on the fork's first hydrate) — a storage hiccup must never fail the fork,
+  // matching the Neon-branch stance below.
   const rawRows = await db
-    .select({ path: filesTable.path, content: filesTable.content, hash: filesTable.hash })
+    .select({ path: filesTable.path, hash: filesTable.hash })
     .from(filesTable)
     .where(eq(filesTable.sessionId, sessionId));
 
   if (rawRows.length > 0) {
     await db
       .insert(filesTable)
-      .values(
-        rawRows.map((r) => ({
-          sessionId: forked.id,
-          path: r.path,
-          content: r.content,
-          hash: r.hash,
-        }))
-      )
+      .values(rawRows.map((r) => ({ sessionId: forked.id, path: r.path, hash: r.hash })))
       .onConflictDoNothing({ target: [filesTable.sessionId, filesTable.path] });
 
-    // For R2-backed rows, copy the underlying objects to the fork's own key
-    // prefix. Best-effort per file (a failed copy just means that one file is
-    // skipped on the fork's first hydrate) — a storage hiccup must never fail
-    // the fork, matching the Neon-branch stance below.
-    if (isR2Configured()) {
-      const r2Paths = rawRows.filter((r) => r.hash != null).map((r) => r.path);
-      for (let i = 0; i < r2Paths.length; i += 8) {
-        await Promise.all(
-          r2Paths.slice(i, i + 8).map((p) =>
-            copyObject(sessionFileKey(sessionId, p), sessionFileKey(forked.id, p)).catch((err) =>
-              console.error(`[sessions] fork R2 copy failed for ${p}`, err)
-            )
+    for (let i = 0; i < rawRows.length; i += 8) {
+      await Promise.all(
+        rawRows.slice(i, i + 8).map((r) =>
+          copyObject(sessionFileKey(sessionId, r.path), sessionFileKey(forked.id, r.path)).catch(
+            (err) => console.error(`[sessions] fork R2 copy failed for ${r.path}`, err)
           )
-        );
-      }
+        )
+      );
     }
   }
 

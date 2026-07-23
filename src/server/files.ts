@@ -7,22 +7,23 @@ import { files } from "@/db/schema";
 import {
   deleteObjects,
   getTextObject,
-  isR2Configured,
   putTextObject,
   sessionFileKey,
 } from "@/server/r2";
 
 // ---------------------------------------------------------------------------
-// Directory snapshot -> `files` table upsert, used by the Phase 2 build
-// phase (src/server/agent.ts) after the build query() completes, and read
-// back by GET /api/sessions/[id]/files for the timeline's file viewer.
+// Directory snapshot -> `files` table INDEX + Cloudflare R2 bytes, used by the
+// Phase 2 build phase (src/server/agent.ts) after the build query() completes,
+// and read back by GET /api/sessions/[id]/files for the timeline's file
+// viewer.
 //
 // "R2 = bytes, DB = index" (see src/server/r2.ts + the files-table comment in
-// src/db/schema.ts): when R2 is configured, a changed file's bytes go to R2
-// and its row carries only {hash}; when R2 is unconfigured the bytes go in the
-// `content` column exactly as before. getSessionFiles hydrates both shapes
-// back into the unchanged SessionFile { path, content, updatedAt } contract,
-// so none of its consumers change.
+// src/db/schema.ts): a changed file's bytes go to R2 under
+// sessions/<sessionId>/<path>, its row stores only {path, hash}. R2 is
+// REQUIRED — putTextObject/getTextObject throw when it's unconfigured, so a
+// build without R2 fails loudly at snapshot time rather than silently losing
+// files. getSessionFiles hydrates the bytes back into the SessionFile
+// { path, content, updatedAt } contract, so its consumers are unchanged.
 // ---------------------------------------------------------------------------
 
 const EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next", ".turbo"]);
@@ -97,16 +98,18 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 /**
- * Snapshots `dir` recursively (excluding node_modules/.git/.next/.turbo) and
- * upserts every changed file into the `files` table, keyed by
- * (session_id, path). Diff is by sha256 for R2-backed rows, string-compare for
- * legacy rows. When R2 is configured, changed bytes are PUT to R2 first and
- * the row stores only {hash}; otherwise the row stores {content} as before.
- * Files that have vanished from disk since the last snapshot have their rows
- * (and R2 objects) deleted. Returns the list of changed relative paths that
- * were WRITTEN — vanished paths are NOT included (callers, e.g.
- * syncChangedFilesToSandbox, re-read every returned path from disk, so a
- * deleted path in the return value would ENOENT).
+ * Snapshots `dir` recursively (excluding node_modules/.git/.next/.turbo),
+ * PUTs every changed file's bytes to R2, and upserts its index row {path,
+ * hash} keyed by (session_id, path). Diff is by sha256. Files that have
+ * vanished from disk since the last snapshot have their rows (and R2 objects)
+ * deleted. Returns the list of changed relative paths that were WRITTEN —
+ * vanished paths are NOT included (callers, e.g. syncChangedFilesToSandbox,
+ * re-read every returned path from disk, so a deleted path in the return value
+ * would ENOENT).
+ *
+ * R2 is required: a changed file's putTextObject throws when R2 is
+ * unconfigured, failing the whole snapshot (and the build) loudly rather than
+ * persisting an index row with no bytes behind it.
  *
  * NB every caller (src/server/agent-phases.ts) passes the FULL sandbox dir, so
  * the vanished-set is always computed against a complete tree — restore/fork
@@ -119,16 +122,15 @@ export async function snapshotSessionFiles(
 ): Promise<string[]> {
   if (!existsSync(dir)) return [];
   const db = getDb();
-  const r2 = isR2Configured();
 
   const relPaths: string[] = [];
   walk(dir, dir, relPaths);
 
   const existing = await db
-    .select({ path: files.path, content: files.content, hash: files.hash })
+    .select({ path: files.path, hash: files.hash })
     .from(files)
     .where(eq(files.sessionId, sessionId));
-  const existingByPath = new Map(existing.map((f) => [f.path, f]));
+  const existingByPath = new Map(existing.map((f) => [f.path, f.hash]));
 
   // Gather the files whose content actually changed (read + hash), skipping
   // unreadable/oversized ones. Do this before any writes so the write fan-out
@@ -148,11 +150,7 @@ export async function snapshotSessionFiles(
     }
 
     const hash = sha256hex(content);
-    const row = existingByPath.get(relPath);
-    if (row) {
-      // R2-backed rows compare by hash; legacy rows fall back to content.
-      if (row.hash != null ? row.hash === hash : row.content === content) continue;
-    }
+    if (existingByPath.get(relPath) === hash) continue; // unchanged
     toWrite.push({ relPath, content, hash });
   }
 
@@ -160,26 +158,16 @@ export async function snapshotSessionFiles(
   for (const group of chunk(toWrite, IO_CONCURRENCY)) {
     await Promise.all(
       group.map(async ({ relPath, content, hash }) => {
-        if (r2) {
-          // PUT the bytes before claiming the row is R2-backed, so a row never
-          // points at an object that doesn't exist.
-          await putTextObject(sessionFileKey(sessionId, relPath), content);
-          await db
-            .insert(files)
-            .values({ sessionId, path: relPath, content: null, hash })
-            .onConflictDoUpdate({
-              target: [files.sessionId, files.path],
-              set: { content: null, hash, updatedAt: new Date() },
-            });
-        } else {
-          await db
-            .insert(files)
-            .values({ sessionId, path: relPath, content, hash: null })
-            .onConflictDoUpdate({
-              target: [files.sessionId, files.path],
-              set: { content, hash: null, updatedAt: new Date() },
-            });
-        }
+        // PUT the bytes before writing the index row, so a row never points at
+        // an object that doesn't exist yet.
+        await putTextObject(sessionFileKey(sessionId, relPath), content);
+        await db
+          .insert(files)
+          .values({ sessionId, path: relPath, hash })
+          .onConflictDoUpdate({
+            target: [files.sessionId, files.path],
+            set: { hash, updatedAt: new Date() },
+          });
       })
     );
     for (const { relPath } of group) changed.push(relPath);
@@ -199,12 +187,10 @@ export async function snapshotSessionFiles(
       await db
         .delete(files)
         .where(and(eq(files.sessionId, sessionId), inArray(files.path, vanished)));
-      if (r2) {
-        try {
-          await deleteObjects(vanished.map((p) => sessionFileKey(sessionId, p)));
-        } catch (err) {
-          console.error(`[files] failed to delete vanished R2 objects for ${sessionId}`, err);
-        }
+      try {
+        await deleteObjects(vanished.map((p) => sessionFileKey(sessionId, p)));
+      } catch (err) {
+        console.error(`[files] failed to delete vanished R2 objects for ${sessionId}`, err);
       }
     }
   }
@@ -214,8 +200,8 @@ export async function snapshotSessionFiles(
 
 /**
  * All latest-snapshot files for a session, for the file viewer / GitHub export
- * / Vercel deploy / restore / fork. Legacy rows return their inline content;
- * R2-backed rows have their bytes hydrated from R2 (bounded concurrency).
+ * / Vercel deploy / restore / fork. Each index row's bytes are hydrated from
+ * R2 (bounded concurrency).
  *
  * A genuinely-missing R2 object (404) is logged and that one file skipped —
  * never fails the whole call (all-missing degrades to 0 files, hitting the
@@ -226,38 +212,15 @@ export async function snapshotSessionFiles(
 export async function getSessionFiles(sessionId: string): Promise<SessionFile[]> {
   const db = getDb();
   const rows = await db
-    .select({
-      path: files.path,
-      content: files.content,
-      hash: files.hash,
-      updatedAt: files.updatedAt,
-    })
+    .select({ path: files.path, updatedAt: files.updatedAt })
     .from(files)
     .where(eq(files.sessionId, sessionId));
 
-  const r2 = isR2Configured();
   const out: (SessionFile | null)[] = new Array(rows.length).fill(null);
-  const r2Indices: number[] = [];
-
-  rows.forEach((r, i) => {
-    if (r.content != null) {
-      out[i] = { path: r.path, content: r.content, updatedAt: r.updatedAt };
-    } else if (r.hash != null) {
-      r2Indices.push(i); // hydrate below
-    }
-    // both null: malformed row (shouldn't happen) — leave skipped.
-  });
-
-  for (const group of chunk(r2Indices, IO_CONCURRENCY)) {
+  for (const group of chunk(rows.map((_, i) => i), IO_CONCURRENCY)) {
     await Promise.all(
       group.map(async (i) => {
         const r = rows[i];
-        if (!r2) {
-          console.error(
-            `[files] R2-backed row ${sessionId}/${r.path} but R2 is not configured; skipping`
-          );
-          return;
-        }
         const body = await getTextObject(sessionFileKey(sessionId, r.path));
         if (body == null) {
           console.error(`[files] R2 object missing for ${sessionId}/${r.path}; skipping`);
