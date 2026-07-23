@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
-import { creditLedger, jobs, projects, sessions, users } from "@/db/schema";
+import { creditLedger, jobs, projects, sessions } from "@/db/schema";
 
 // ---------------------------------------------------------------------------
 // Phase 4 (Half A, REAL): credit ledger accounting.
@@ -166,9 +166,9 @@ const SIGNUP_BONUS_REASON = "signup_bonus";
  * rejects the second one via onConflictDoNothing — a plain SELECT-then-INSERT
  * can't be made atomic this way even inside a transaction under read
  * committed. Safe to call on every request rather than only "on user
- * creation". Called from src/server/jobs.ts (project creation, both
- * DEV_USER and Clerk owner branches) and from GET /api/credits (so the
- * balance is non-zero even before the user's first project).
+ * creation". Called from src/server/jobs.ts (project creation) and from
+ * GET /api/credits (so the balance is non-zero even before the user's first
+ * project).
  */
 export async function ensureSignupBonus(userId: string): Promise<void> {
   const db = getDb();
@@ -227,17 +227,4 @@ export async function grantStripePurchase(
       idempotencyKey: reason,
     })
     .onConflictDoNothing({ target: creditLedger.idempotencyKey });
-}
-
-/** Row shape for a user, used by the small dev-user upsert below. */
-type UsersInsert = typeof users.$inferInsert;
-
-/**
- * Ensures a `users` row exists for `userId` (idempotent upsert) — used only
- * by the DEV_USER bootstrap path so GET /api/credits works even before any
- * project has ever been created in this environment.
- */
-export async function ensureUserRow(row: UsersInsert): Promise<void> {
-  const db = getDb();
-  await db.insert(users).values(row).onConflictDoNothing({ target: users.id });
 }

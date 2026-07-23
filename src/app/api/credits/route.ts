@@ -1,34 +1,16 @@
 import { NextResponse } from "next/server";
-import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
-import { DEV_USER } from "@/lib/dev-user";
-import {
-  ensureSignupBonus,
-  ensureUserRow,
-  getUserCreditBalance,
-} from "@/server/credits";
+import { getCurrentUser } from "@/lib/auth";
+import { ensureSignupBonus, getUserCreditBalance } from "@/server/credits";
 
 // ---------------------------------------------------------------------------
-// Phase 4 (Half A, REAL): GET /api/credits — the current user's real credit
-// balance (sum of their credit_ledger rows). Same isClerkConfigured() /
-// DEV_USER gate as src/server/jobs.ts's createProjectAndJob, so this works
-// standalone even before any project has ever been created in this
-// environment (e.g. right after a fresh `npm run dev`, before the first
-// prompt is submitted).
+// GET /api/credits — the current user's real credit balance (sum of their
+// credit_ledger rows). getCurrentUser() provisions the `users` row on first
+// authenticated request, so this works standalone before any project has ever
+// been created.
 // ---------------------------------------------------------------------------
 
 export async function GET() {
-  let userId: string;
-  if (isClerkConfigured()) {
-    const user = await getCurrentUser();
-    userId = user.id;
-  } else {
-    await ensureUserRow({
-      id: DEV_USER.id,
-      email: DEV_USER.email,
-      name: DEV_USER.name,
-    });
-    userId = DEV_USER.id;
-  }
+  const { id: userId } = await getCurrentUser();
 
   await ensureSignupBonus(userId);
   const balance = await getUserCreditBalance(userId);

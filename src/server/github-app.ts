@@ -10,8 +10,9 @@ import { getSessionFiles } from "@/server/files";
 // personal-access-token approach (formerly src/server/github.ts, deleted).
 //
 // Same "off by default, gated inert" pattern as every other isXConfigured()
-// in this codebase (isClerkConfigured in src/lib/auth.ts, isVercelConfigured
-// in src/server/vercel.ts, isStripeConfigured in src/server/stripe.ts):
+// in this codebase (isVercelConfigured in src/server/vercel.ts,
+// isStripeConfigured in src/server/stripe.ts — note auth is deliberately NOT
+// one of these; see src/lib/auth.ts for why it has no "off" path):
 // isGitHubAppConfigured() gates everything else in this file. Unlike the
 // Clerk/Vercel/Stripe integrations, this one IS live-configured and
 // live-verified in this environment — GITHUB_APP_ID and

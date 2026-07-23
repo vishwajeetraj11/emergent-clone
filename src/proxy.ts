@@ -1,45 +1,36 @@
-import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
-import { isClerkConfigured } from "@/lib/auth";
+import { clerkMiddleware } from "@clerk/nextjs/server";
+import type { NextFetchEvent, NextRequest } from "next/server";
+import { assertClerkConfigured } from "@/lib/auth";
 
 // ---------------------------------------------------------------------------
-// Phase 3 (Half B, gated inert): Next.js 16 renamed middleware.ts -> proxy.ts
-// (this repo pins next@16.2.10) — the default export must be named `proxy`.
+// Next.js 16 renamed middleware.ts -> proxy.ts (this repo pins next@16.2.10);
+// the file must export a single function, default or named `proxy`.
 //
-// Clerk's own docs confirm `clerkMiddleware()` throws ("Missing
-// publishableKey") when called without keys configured — so the only safe
-// way to keep this a true no-op when unconfigured is to never call it, and
-// never even import `@clerk/nextjs/server` (a static import would still pull
-// the module in, but its side effects only fire when clerkMiddleware() is
-// actually invoked to build a handler). The dynamic import below only
-// happens inside the isClerkConfigured() branch, so with no
-// CLERK_SECRET_KEY / NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY set (the default in
-// this environment and verified via `npm run build` / `npm run lint` /
-// `next dev`), this proxy is a pure passthrough — no Clerk code ever runs.
+// Clerk is required in every environment (see src/lib/auth.ts), so this runs
+// unconditionally — there is no passthrough branch. It used to have one, keyed
+// off whether the Clerk keys happened to be set, which meant a deploy missing
+// them served every route unauthenticated instead of failing.
+//
+// Both the assert and clerkMiddleware() are called per-request rather than at
+// module scope: clerkMiddleware() throws "Missing publishableKey" when
+// unconfigured, and at module scope that would fail `next build` (which loads
+// this file) rather than the requests it is meant to protect. assertClerk-
+// Configured() runs first only so the error says what to set.
+//
+// Route-level protection (e.g. /p/[projectId]) lives in each page via auth(),
+// not here — Clerk's own createRouteMatcher + auth.protect() middleware pattern
+// is deprecated in favor of resource-based checks per page/layout/route, since
+// path matching here can diverge from how Next.js actually routes a request.
 // ---------------------------------------------------------------------------
 
 type ClerkHandler = (req: NextRequest, event: NextFetchEvent) => unknown;
 
 let clerkHandler: ClerkHandler | null = null;
 
-// Route-level protection (e.g. /p/[projectId]) lives in each page via
-// isClerkConfigured() + auth(), not here — Clerk's own createRouteMatcher +
-// auth.protect() middleware pattern is deprecated in favor of resource-based
-// checks per-page/layout/route, since path matching here can diverge from
-// how Next.js actually routes a request.
-async function getClerkHandler(): Promise<ClerkHandler> {
-  if (!clerkHandler) {
-    const { clerkMiddleware } = await import("@clerk/nextjs/server");
-    clerkHandler = clerkMiddleware() as ClerkHandler;
-  }
-  return clerkHandler;
-}
-
-export default async function proxy(request: NextRequest, event: NextFetchEvent) {
-  if (!isClerkConfigured()) {
-    return NextResponse.next();
-  }
-  const handler = await getClerkHandler();
-  return handler(request, event);
+export default function proxy(request: NextRequest, event: NextFetchEvent) {
+  assertClerkConfigured();
+  clerkHandler ??= clerkMiddleware() as ClerkHandler;
+  return clerkHandler(request, event);
 }
 
 export const config = {

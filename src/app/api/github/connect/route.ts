@@ -4,9 +4,9 @@ import { getGitHubInstallUrl, isGitHubAppConfigured } from "@/server/github-app"
 /**
  * Kicks off the GitHub App installation flow — redirects the browser to
  * GitHub's own install/consent screen. Doesn't require a NEW auth check:
- * getCurrentUser() (via getGitHubInstallUrl()'s callers) already follows the
- * existing Clerk-configured-vs-DEV_USER pattern everywhere else in this app,
- * so this route just needs to exist and redirect — the callback route is
+ * getCurrentUser() (via getGitHubInstallUrl()'s callers) already resolves the
+ * signed-in user the same way as everywhere else in this app, so this route
+ * just needs to exist and redirect — the callback route is
  * what actually associates the resulting installation with a user.
  */
 export async function GET() {

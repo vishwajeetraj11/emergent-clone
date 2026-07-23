@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { ClerkGate } from "@/components/auth/ClerkGate";
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -43,9 +43,18 @@ export default function RootLayout({
         >
           Skip to main content
         </a>
-        <ClerkGate>
+        {/* Post-auth landing is /dashboard, not `/` — `/` is the marketing
+            page, so without these a fresh sign-in drops the user back on the
+            pitch instead of the product. Set here rather than via
+            NEXT_PUBLIC_CLERK_SIGN_{IN,UP}_FALLBACK_REDIRECT_URL so the routing
+            lives in version control next to the routes it names; these props
+            take precedence over those env vars. */}
+        <ClerkProvider
+          signInFallbackRedirectUrl="/dashboard"
+          signUpFallbackRedirectUrl="/dashboard"
+        >
           <TooltipProvider>{children}</TooltipProvider>
-        </ClerkGate>
+        </ClerkProvider>
       </body>
     </html>
   );

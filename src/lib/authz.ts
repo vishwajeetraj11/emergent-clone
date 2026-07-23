@@ -1,24 +1,20 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { jobs, projects, sessions } from "@/db/schema";
-import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
+import { getCurrentUser } from "@/lib/auth";
 
 // ---------------------------------------------------------------------------
 // Ownership checks for session/project/job-scoped API routes.
 //
-// Unconfigured (default, always-tested path): DEV_USER owns every row and
-// there is no real multi-tenancy, so every assert*Ownership call below is a
-// no-op that returns immediately — same "gated inert" pattern already used
-// throughout this codebase (isGitHubAppConfigured in
-// src/server/github-app.ts, isVercelConfigured in src/server/vercel.ts,
-// isStripeConfigured). This MUST
-// NOT change any behavior in the unconfigured path.
+// Resolves the signed-in Clerk user (getCurrentUser) and compares it against
+// the resource's owning userId, joined through sessions/projects/jobs — same
+// join shape as src/server/credits.ts's getJobOwnerUserId.
 //
-// Configured: resolves the real signed-in Clerk user (getCurrentUser) and
-// compares it against the resource's owning userId, joined through
-// sessions/projects/jobs — same join shape as src/server/credits.ts's
-// getJobOwnerUserId. Code-complete against the documented schema, NOT
-// live-verified end-to-end — no real Clerk keys exist in this environment.
+// These checks are unconditional. They used to return early whenever Clerk was
+// unconfigured, on the reasoning that DEV_USER owned every row so there was no
+// multi-tenancy to enforce — which meant a deploy with the Clerk vars missing
+// disabled every ownership check in the app at once. Auth is now required in
+// every environment (see src/lib/auth.ts), so there is no such path.
 // ---------------------------------------------------------------------------
 
 /**
@@ -81,8 +77,6 @@ export function ownershipMatches(
 async function assertOwnership(
   getOwnerUserId: () => Promise<string | null>
 ): Promise<void> {
-  if (!isClerkConfigured()) return;
-
   // Independent lookups — getOwnerUserId() queries by resource id and never
   // consults the current user — so they run concurrently rather than paying
   // two serialized round trips to a remote DB. Promise.all rejects on the

@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
-import { DEV_USER } from "@/lib/dev-user";
+import { getCurrentUser } from "@/lib/auth";
 import { createCreditCheckoutSession, isStripeConfigured } from "@/server/stripe";
 
 /**
@@ -20,7 +19,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const userId = isClerkConfigured() ? (await getCurrentUser()).id : DEV_USER.id;
+    const userId = (await getCurrentUser()).id;
     const origin = new URL(request.url).origin;
     const { url } = await createCreditCheckoutSession(userId, origin);
     return NextResponse.json({ configured: true, url });

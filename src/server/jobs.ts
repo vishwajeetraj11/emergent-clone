@@ -1,8 +1,7 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { jobs, projects, sessions, users } from "@/db/schema";
-import { DEV_USER } from "@/lib/dev-user";
-import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
+import { jobs, projects, sessions } from "@/db/schema";
+import { getCurrentUser } from "@/lib/auth";
 import type { JobStatus } from "@/lib/types";
 import { appendEvent } from "@/server/events";
 import { ensureSignupBonus } from "@/server/credits";
@@ -16,21 +15,6 @@ export type SessionRow = typeof sessions.$inferSelect;
 export type JobRow = typeof jobs.$inferSelect;
 
 const MAX_SLUG_ATTEMPTS = 5;
-
-/**
- * Single-user dev mode (Phase 0-2, see src/lib/dev-user.ts): make sure the
- * fixed dev user row exists before we FK anything to it. Idempotent — safe
- * to call on every request. Phase 3: only runs when Clerk isn't configured;
- * when it is, getCurrentUser() below already provisions the real user's row
- * (just-in-time, on that user's first authenticated request).
- */
-async function ensureDevUser() {
-  const db = getDb();
-  await db
-    .insert(users)
-    .values({ id: DEV_USER.id, email: DEV_USER.email, name: DEV_USER.name })
-    .onConflictDoNothing({ target: users.id });
-}
 
 /**
  * Creates a project + session + job for a fresh prompt, seeds event seq 0
@@ -47,19 +31,10 @@ async function ensureDevUser() {
 export async function createProjectAndJob(prompt: string, model?: string, apiKeys?: UserApiKeys) {
   const db = getDb();
 
-  // Phase 3: isClerkConfigured() gates which user this project is owned by.
-  // Unconfigured (default, always-tested): ensureDevUser + DEV_USER.id,
-  // unchanged from Phase 0-2. Configured: getCurrentUser() resolves the real
-  // signed-in Clerk user's row instead, provisioning it if this is their very
-  // first authenticated request — unverified, no real keys in this
-  // environment.
-  let owner: { id: string };
-  if (isClerkConfigured()) {
-    owner = await getCurrentUser();
-  } else {
-    await ensureDevUser();
-    owner = DEV_USER;
-  }
+  // getCurrentUser() resolves the signed-in Clerk user's row, provisioning it
+  // if this is their very first authenticated request, and throws when there
+  // is no session at all.
+  const owner = await getCurrentUser();
   // Phase 4: idempotent — only actually grants credits the first time this
   // user is seen (see src/server/credits.ts's ensureSignupBonus).
   await ensureSignupBonus(owner.id);

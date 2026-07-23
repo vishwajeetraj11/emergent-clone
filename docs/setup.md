@@ -61,14 +61,24 @@ whose provider key is missing are hidden from the composer's model picker.
 
 `MOCK_AGENT=1` runs a scripted trajectory instead, with no model calls at all.
 
----
-
 ## Clerk auth — `CLERK_SECRET_KEY`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
 
-Leave both unset and the app runs in single-user dev mode with `DEV_USER` —
-no Clerk code runs at all, not even at import time (`src/lib/auth.ts`'s
-`isClerkConfigured()`, `src/proxy.ts`, `src/components/auth/ClerkGate.tsx`).
-Set both to real dashboard values to replace `DEV_USER` with signed-in users.
+**Required in every environment, dev included.** There is no unauthenticated
+mode. With either key missing, `assertClerkConfigured()` throws from
+`src/proxy.ts` on the first request and says what to set.
+
+This used to fall back to a fixed `DEV_USER` when the keys were absent. That
+made missing configuration silently disable auth: a deploy without these vars
+came up as a public, single-identity builder where every visitor shared one
+user's projects, credits, and GitHub installation, and `/` redirected straight
+into the builder so nothing looked wrong. Every other integration here fails
+closed — no Stripe key means no "Buy Credits" — but auth was the one place
+where absence removed a restriction rather than a feature.
+
+Get both from a Clerk dashboard instance. Local dev needs its own (a
+development instance's `pk_test_`/`sk_test_` pair is free).
+
+---
 
 ## GitHub "Save" — `GITHUB_APP_*`
 

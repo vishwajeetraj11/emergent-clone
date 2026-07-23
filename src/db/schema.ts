@@ -40,9 +40,9 @@ export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: varchar("email", { length: 255 }).notNull().unique(),
   name: varchar("name", { length: 255 }),
-  // Phase 3: nullable, only ever populated when Clerk is configured (see
-  // src/lib/auth.ts's isClerkConfigured()) — single-user dev mode (the
-  // default, unconfigured behavior) never touches this column.
+  // The Clerk user this row maps to, populated just-in-time on that user's
+  // first authenticated request (src/lib/auth.ts's getCurrentUser). Nullable
+  // only because rows predating required auth may not have one.
   clerkUserId: varchar("clerk_user_id", { length: 255 }).unique(),
   // GitHub App installation id for this user's connected GitHub account (see
   // src/server/github-app.ts). Nullable — stays null until the user

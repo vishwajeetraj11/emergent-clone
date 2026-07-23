@@ -26,9 +26,8 @@ interface ProjectListItem {
  * entirely: the app only ever navigated to one project at a time via its
  * direct URL, with nowhere to see everything you'd built. Rendered on the
  * empty/home preview state (see PreviewPanel); renders nothing while
- * loading or if the signed-in user (or DEV_USER, if Clerk is unconfigured)
- * has no projects yet, so it never displaces the onboarding carousel for a
- * genuinely new user.
+ * loading or if the signed-in user has no projects yet, so it never displaces
+ * the onboarding carousel for a genuinely new user.
  */
 export function ProjectsList({
   onSelectProject,
