@@ -31,9 +31,6 @@ const MAX_SLUG_ATTEMPTS = 5;
 export async function createProjectAndJob(prompt: string, model?: string, apiKeys?: UserApiKeys) {
   const db = getDb();
 
-  // getCurrentUser() resolves the signed-in Clerk user's row, provisioning it
-  // if this is their very first authenticated request, and throws when there
-  // is no session at all.
   const owner = await getCurrentUser();
   // Phase 4: idempotent — only actually grants credits the first time this
   // user is seen (see src/server/credits.ts's ensureSignupBonus).

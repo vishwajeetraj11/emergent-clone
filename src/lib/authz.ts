@@ -3,19 +3,10 @@ import { getDb } from "@/db";
 import { jobs, projects, sessions } from "@/db/schema";
 import { getCurrentUser } from "@/lib/auth";
 
-// ---------------------------------------------------------------------------
-// Ownership checks for session/project/job-scoped API routes.
-//
-// Resolves the signed-in Clerk user (getCurrentUser) and compares it against
-// the resource's owning userId, joined through sessions/projects/jobs — same
-// join shape as src/server/credits.ts's getJobOwnerUserId.
-//
-// These checks are unconditional. They used to return early whenever Clerk was
-// unconfigured, on the reasoning that DEV_USER owned every row so there was no
-// multi-tenancy to enforce — which meant a deploy with the Clerk vars missing
-// disabled every ownership check in the app at once. Auth is now required in
-// every environment (see src/lib/auth.ts), so there is no such path.
-// ---------------------------------------------------------------------------
+// Ownership checks for session/project/job-scoped API routes: resolves the
+// signed-in user and compares against the resource's owning userId, joined
+// through sessions/projects/jobs — same join shape as src/server/credits.ts's
+// getJobOwnerUserId. Unconditional by design; see src/lib/auth.ts.
 
 /**
  * Thrown by assert*Ownership when a resource doesn't exist OR exists but is

@@ -44,9 +44,6 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // getCurrentUser() provisions the `users` row if this is the user's first
-  // authenticated request, so the UPDATE below can never silently affect zero
-  // rows and lose the installation id.
   const currentUser = await getCurrentUser();
 
   if (installationId) {

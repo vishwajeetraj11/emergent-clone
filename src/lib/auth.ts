@@ -1,27 +1,15 @@
 import { cache } from "react";
 import { eq } from "drizzle-orm";
 
-// ---------------------------------------------------------------------------
-// Clerk is REQUIRED, in every environment.
-//
-// This used to fall back to a fixed DEV_USER whenever the Clerk keys were
-// absent, which made the absence of configuration silently disable auth: a
-// deploy missing CLERK_SECRET_KEY / NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY came up
-// as a public, single-identity builder where every visitor shared one user's
-// projects, credits, and GitHub installation. Missing config now fails the
-// request instead — assertClerkConfigured() throws, and src/proxy.ts calls it
-// before anything else can run.
-//
-// Every other isXConfigured() gate in this codebase fails CLOSED (no Stripe
-// key means "Buy Credits" is unavailable). Auth was the one place where
-// absence removed a restriction rather than a feature, which is why it does
-// not get an "off" path at all.
-// ---------------------------------------------------------------------------
+// Clerk is REQUIRED in every environment, and deliberately has no
+// isXConfigured() "off" path like the other integrations: for those, absent
+// credentials remove a feature, but for auth they would remove a restriction —
+// and absence is the default state of every misconfiguration.
 
 /**
- * Throws unless both Clerk keys are present. Called from src/proxy.ts on every
- * matched request, so a misconfigured environment surfaces this message rather
- * than Clerk's own "Missing publishableKey" from somewhere deeper in a render.
+ * Throws unless both Clerk keys are present. Called from src/proxy.ts per
+ * request, so a misconfigured environment gets this message rather than Clerk's
+ * own "Missing publishableKey" from somewhere deeper in a render.
  */
 export function assertClerkConfigured(): void {
   if (!process.env.CLERK_SECRET_KEY || !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
