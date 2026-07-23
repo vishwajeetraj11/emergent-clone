@@ -1,6 +1,6 @@
 import { Sandbox } from "@vercel/sandbox";
 import { getSessionFiles } from "@/server/files";
-import { ensureSessionDatabase } from "@/server/project-db";
+import { buildSandboxEnvContent } from "@/server/project-db";
 import {
   type SandboxProvider,
   type SandboxStartOptions,
@@ -368,25 +368,22 @@ export class VercelSandboxProvider implements SandboxProvider {
           sandboxRef = sbx;
           created = true;
 
-          // The session's own Postgres DATABASE_URL rides into the VM as a
-          // `.env.local` alongside the app files — it can't arrive via the
-          // file snapshot (src/server/files.ts deliberately excludes
-          // .env.local from the `files` table precisely so the secret
-          // never leaves the runtime), so it's injected here. Best-effort
-          // inside ensureSessionDatabase's own gating: unconfigured/failed
-          // provisioning just means no .env.local, never a failed sandbox.
-          // Runs only here, on a fresh create — a resumed sandbox's
-          // filesystem (.env.local included) is already sitting on disk
-          // from before its last stop().
+          // The session's own Postgres DATABASE_URL + auth secret ride into
+          // the VM as a `.env.local` alongside the app files — they can't
+          // arrive via the file snapshot (src/server/files.ts deliberately
+          // excludes .env.local from the `files` table precisely so the
+          // secrets never leave the runtime), so it's injected here.
+          // Best-effort inside buildSandboxEnvContent's own gating:
+          // unconfigured/failed provisioning just means no .env.local, never a
+          // failed sandbox. Runs only here, on a fresh create — a resumed
+          // sandbox's filesystem (.env.local included) is already sitting on
+          // disk from before its last stop().
           try {
-            const databaseUrl = await ensureSessionDatabase(sessionId);
-            if (databaseUrl) {
+            const envContent = await buildSandboxEnvContent(sessionId);
+            if (envContent) {
               fileList = [
                 ...fileList.filter((f) => f.path !== ".env.local"),
-                {
-                  path: ".env.local",
-                  content: `# Auto-generated — this app's own Postgres database. Not snapshotted or exported.\nDATABASE_URL=${databaseUrl}\n`,
-                },
+                { path: ".env.local", content: envContent },
               ];
             }
           } catch (err) {
@@ -438,9 +435,8 @@ export class VercelSandboxProvider implements SandboxProvider {
     let envChanged = false;
     if (!created) {
       try {
-        const databaseUrl = await ensureSessionDatabase(sessionId);
-        if (databaseUrl) {
-          const desired = `# Auto-generated — this app's own Postgres database. Not snapshotted or exported.\nDATABASE_URL=${databaseUrl}\n`;
+        const desired = await buildSandboxEnvContent(sessionId);
+        if (desired) {
           const current = await sandbox
             .runCommand({ cmd: "cat", args: [".env.local"] })
             .then((r) => r.output("stdout"))

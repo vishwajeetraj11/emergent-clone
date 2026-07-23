@@ -78,6 +78,13 @@
       "when": 1784449447269,
       "tag": "0010_goofy_romulus",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1784780600781,
+      "tag": "0011_tan_paibok",
+      "breakpoints": true
     }
   ]
 }

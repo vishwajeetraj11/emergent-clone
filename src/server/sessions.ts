@@ -100,9 +100,18 @@ export async function forkSession(sessionId: string): Promise<{
     throw new Error("Session not found");
   }
 
+  // Inherit the parent's auth signing secret so the fork's copy-on-write auth
+  // rows (better-auth's user/session/account tables, branched with the Neon DB
+  // below) stay valid: passwords survive regardless (scrypt-hashed,
+  // secret-independent), and matching the secret also keeps pre-fork login
+  // cookies working on the fork. Null when the parent never provisioned one.
   const [forked] = await db
     .insert(sessions)
-    .values({ projectId: original.projectId, parentSessionId: original.id })
+    .values({
+      projectId: original.projectId,
+      parentSessionId: original.id,
+      authSecret: original.authSecret,
+    })
     .returning();
 
   // Copy the index rows {path, hash} to the fork, then copy each file's R2
