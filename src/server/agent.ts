@@ -20,70 +20,41 @@ import { runBuildPhase } from "@/server/agent-phases";
 import { getSessionFiles } from "@/server/files";
 import { getJobApiKeys, clearJobApiKeys } from "@/server/user-keys";
 
-// ---------------------------------------------------------------------------
 // Multi-agent orchestration: Plan (Opus) -> user approves/revises -> Build
 // (Sonnet) -> Review (Sonnet) -> Debug (Sonnet, only if review found issues).
 //
-// PLANNING: the planner (claude-opus-4-8) asks clarifying questions via the
-// same ask_user tool as before, then writes a build plan. Instead of
-// silently continuing to build, the harness now appends a `plan` event and
-// pauses the job (status "waiting_on_plan") until the user approves or
-// requests changes (POST /api/jobs/[id]/plan) — same "block inside a
-// long-lived harness loop, poll the events table" shape as ask_user's
-// waitForAnswer, just driven by the harness (runPlanningPhase) rather than
-// from inside a tool handler, since writing a plan isn't itself a tool call.
-// A "revise" decision loops back into another planner call with the user's
+// PLANNING pauses the job at "waiting_on_plan" rather than building straight
+// through — same "block inside the harness loop, poll the events table" shape
+// as ask_user's waitForAnswer, but driven by runPlanningPhase, since writing a
+// plan isn't itself a tool call. A "revise" decision loops back with the user's
 // feedback folded in, capped at MAX_PLAN_REVISIONS.
 //
-// BUILD: the builder (claude-sonnet-5) gets real Bash/Read/Write/Edit/Glob/
-// Grep, all executing inside the session's sandbox VM.
+// REVIEW reads the result (no writes) and reports findings via report_review.
+// DEBUG runs only if it found real issues — a clean review costs no extra call.
 //
-// REVIEW + DEBUG (new): once the builder finishes, a review pass (also
-// claude-sonnet-5 — Opus is reserved for planning only, confirmed) reads the
-// resulting code (Read/Grep/Glob/Bash, no writes) and reports structured
-// findings via a custom `report_review` tool (same pattern as ask_user).
-// Only if it found real issues does a debug pass run (same tools as build)
-// to fix them, then the sandbox gets re-snapshotted. A clean review skips
-// the debug pass entirely — no wasted call on a build with nothing wrong.
+// The full pipeline is FORCED on a project's first build. A follow-up message
+// defaults to a direct-to-build edit (CONTINUATION_PLAN_TEXT), but can opt into
+// Plan -> Approve -> Build via a `planMode` flag riding on that job's
+// user_message payload — no new column, same "derive from existing state" as
+// the existingFiles.length check that distinguishes fresh from continuation.
+// Either way the Review(+Debug) tail always runs.
 //
-// This whole pipeline is FORCED on a brand-new project's first build (as
-// scoping always was). For a follow-up message on an already-built session,
-// the default stays today's direct-to-build edit (CONTINUATION_PLAN_TEXT,
-// no planning gate) — but the user can opt a specific message into the full
-// Plan -> Approve -> Build pipeline via a `planMode` flag riding on that
-// job's `user_message` event payload (no new DB column — same "derive from
-// existing state" philosophy as the existingFiles.length check below that
-// already distinguishes fresh builds from continuations). Either way, once
-// a build happens, the new Review(+Debug) tail always runs.
-//
-// REAL RUNTIME: the "real" (non-mock) path runs on the Vercel AI SDK
-// (src/server/llm.ts) with a metered provider key; the agent's file/shell
-// tools execute inside the session's Vercel sandbox (src/server/agent-tools.ts).
-//
-// The `ask_user` tool is a custom in-process SDK MCP tool: when the model
-// calls it, the handler appends the tool_call + question events, flips the
-// job to waiting_on_user, and then BLOCKS — polling the events table for an
-// `answer` event — until the user responds via POST /messages. That call
-// only lives in this process, so if the dev server restarts mid-run the job
-// orphans — an accepted limitation (documented in src/server/jobs.ts), and
-// the same applies to a job parked in waitForPlanDecision.
+// ask_user BLOCKS inside the tool handler, polling the events table until the
+// user answers. That call only lives in this process, so a restart mid-run
+// orphans the job (see jobs.ts's durability note) — same for waitForPlanDecision.
 //
 // ISOLATION: every build/review/debug tool call runs inside the session's
-// Vercel sandbox VM, not on this host — see src/server/agent-tools.ts, which
-// owns the boundary (file tools reject paths outside APP_DIR; Bash is a soft
-// boundary, and the VM itself is the hard one).
+// Vercel sandbox VM, not on this host. src/server/agent-tools.ts owns that
+// boundary: file tools reject paths outside APP_DIR, Bash is a soft boundary,
+// and the VM itself is the hard one.
 //
-// MOCK MODE: if MOCK_AGENT=1, we run a scripted trajectory with identical
-// event shapes (including a scripted plan step) so the whole system is
-// verifiable without any model calls at all. The mock loop stops once the
-// scripted plan is approved — it does not simulate a real build.
-// ---------------------------------------------------------------------------
+// MOCK MODE: MOCK_AGENT=1 runs a scripted trajectory with identical event
+// shapes, so the system is verifiable with no model calls. It stops once the
+// scripted plan is approved and does not simulate a real build.
 
-// Model selection lives in src/server/llm.ts now: the planner is
-// resolvePlannerModel() (Opus when Anthropic is configured, else the
-// flagship OpenAI model — never user-selected), and the builder model comes
-// from the job's user_message payload via resolveBuilderModel() (the user's
-// per-message picker choice; runs that job's build + review + debug).
+// Model selection lives in src/server/llm.ts: the planner is never
+// user-selected (resolvePlannerModel), the builder is (resolveBuilderModel,
+// from the job's user_message payload) and runs build + review + debug.
 
 const MAX_ITERATIONS = 15;
 const MAX_PLAN_REVISIONS = 5;
@@ -104,10 +75,8 @@ export async function runAgentLoop(jobId: string): Promise<void> {
     }
   } finally {
     runningJobs.delete(jobId);
-    // BYOK: wipe this job's stored user key(s), if any, the moment its run
-    // ends — success, failure, or stop — so nothing outlives the job that
-    // needed it (see src/server/user-keys.ts). A no-op when this job never
-    // had any keys stashed (setJobApiKeys was never called for it).
+    // BYOK: wipe this job's user key(s) the moment the run ends — success,
+    // failure, or stop — so nothing outlives the job that needed it.
     clearJobApiKeys(jobId);
   }
 }
@@ -124,12 +93,8 @@ async function handleAgentError(jobId: string, err: unknown) {
 }
 
 // ---------------------------------------------------------------------------
-// Real trajectory (AI SDK — see src/server/llm.ts's runAgentQuery)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Planning phase (claude-opus-4-8): ask_user Q&A (first pass only, unless
-// the caller says otherwise) -> plan text -> user approve/revise gate.
+// Planning phase: ask_user Q&A (first pass only, unless the caller says
+// otherwise) -> plan text -> user approve/revise gate.
 // ---------------------------------------------------------------------------
 
 interface PlanQueryResult {
@@ -161,8 +126,7 @@ async function runPlanQuery(
         await appendEvent(jobId, "assistant", "assistant_message", { text, stepId });
       },
       onToolCall: async (call) => {
-        // ask_user's tool_call/question events are appended by its own
-        // execute handler (agent-tools.ts) — only note that it was called.
+        // ask_user appends its own tool_call/question events.
         if (call.name === "ask_user") askUserCalled = true;
       },
       shouldAbort: () => isStopped(jobId),
@@ -189,10 +153,9 @@ async function runPlanQuery(
 }
 
 /**
- * Polls for the `plan_decision` event matching a specific `plan` event's id
- * — same ~800ms poll shape as waitForAnswer, but called directly from the
- * harness loop (runPlanningPhase) rather than from inside a tool handler,
- * since writing a plan isn't itself a tool call the way ask_user is.
+ * Polls for the `plan_decision` event matching a specific `plan` event's id.
+ * Called from the harness loop rather than a tool handler, since writing a plan
+ * isn't itself a tool call the way ask_user is.
  */
 async function waitForPlanDecision(
   jobId: string,
