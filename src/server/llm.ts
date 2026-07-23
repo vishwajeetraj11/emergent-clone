@@ -65,10 +65,10 @@ export function defaultBuilderModel(keys?: UserApiKeys): string {
   return m.id;
 }
 
-/** Planner is never user-selected: Opus when Anthropic is configured, else the flagship OpenAI model. A BYOK key widens this the same way as the builder path — a user with only an OpenAI key still gets a real planner model on an Anthropic-only platform. */
+/** Planner is never user-selected: Opus when Anthropic is configured, else the strongest OpenAI model the platform offers (terra — the sol flagship is intentionally out of the catalog on cost grounds). A BYOK key widens this the same way as the builder path — a user with only an OpenAI key still gets a real planner model on an Anthropic-only platform. */
 export function resolvePlannerModel(keys?: UserApiKeys): string {
   if (providerAvailable("anthropic", keys)) return "claude-opus-4-8";
-  if (providerAvailable("openai", keys)) return "gpt-5.6-sol";
+  if (providerAvailable("openai", keys)) return "gpt-5.6-terra";
   throw new Error(
     "No LLM provider is configured — set OPENAI_API_KEY and/or ANTHROPIC_API_KEY, or supply a personal API key."
   );
