@@ -19,14 +19,20 @@ export function PausedPreviewCard({
   onRestartPreview?: () => void;
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+    // role="status": the preview dying is a state change nobody asked for —
+    // the iframe is simply replaced by this card, which a screen-reader user
+    // has no way to notice otherwise.
+    <div
+      role="status"
+      className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center"
+    >
       <PowerOff className="size-8 text-muted-foreground" />
       <p className="text-sm font-medium text-foreground">{PAUSED_PREVIEW_TITLE}</p>
       <p className="max-w-sm text-center text-sm text-muted-foreground">
         {PAUSED_PREVIEW_BODY}
       </p>
       {restoreError && (
-        <p className="max-w-sm text-center text-xs text-red-400">
+        <p role="alert" className="max-w-sm text-center text-xs text-red-400">
           Restart failed: {restoreError}
         </p>
       )}

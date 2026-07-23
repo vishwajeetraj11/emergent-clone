@@ -68,12 +68,15 @@ export function TopBar({
         <div className="flex size-6 items-center justify-center rounded-md bg-gradient-to-br from-emerald-400 to-emerald-600 text-background">
           <Sparkles className="size-3.5" />
         </div>
-        <button
-          type="button"
-          className="flex items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-3 py-1 text-xs font-medium text-foreground transition-colors hover:bg-secondary"
-        >
+        {/* A pill-shaped LABEL, not a control — it has no handler and never
+            had one. As a <button> it was still a tab stop that announced
+            "App builder, button" and then did nothing when activated, which
+            is worse for a keyboard/screen-reader user than for a mouse one
+            (they can't see that nothing happened). A <span> keeps the exact
+            same pixels without promising an action. */}
+        <span className="flex items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-3 py-1 text-xs font-medium text-foreground">
           App builder
-        </button>
+        </span>
         <Button
           variant="ghost"
           size="sm"

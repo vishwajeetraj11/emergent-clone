@@ -31,6 +31,18 @@ export default function RootLayout({
       className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
+        {/* Skip link — first thing in the tab order, visually hidden until
+            focused. Without it a keyboard user re-tabs the entire topbar
+            (home, project tabs, credits, notifications, account) on every
+            single page before reaching the chat/preview they came for.
+            Targets #main-content, rendered by AppShell's <main> and by the
+            marketing page's <main>. */}
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-100 focus:rounded-md focus:bg-foreground focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-background"
+        >
+          Skip to main content
+        </a>
         <ClerkGate>
           <TooltipProvider>{children}</TooltipProvider>
         </ClerkGate>

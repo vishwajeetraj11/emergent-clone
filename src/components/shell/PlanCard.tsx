@@ -76,14 +76,32 @@ export function PlanCard({
             </p>
           )}
           {showFeedbackInput && (
-            <textarea
-              value={feedback}
-              onChange={(e) => setFeedback(e.target.value)}
-              placeholder="What would you like to change about this plan?"
-              disabled={disabled}
-              rows={2}
-              className="resize-none rounded-md border border-input bg-input/20 px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none disabled:opacity-50"
-            />
+            <>
+              {/* Named, because a placeholder is a hint and not an
+                  accessible name. Focused on mount via a callback ref (not
+                  autoFocus, which jsx-a11y rejects for firing on initial page
+                  load): this textarea only exists after "Request changes" is
+                  pressed, so without moving focus a keyboard user presses the
+                  button and lands nowhere, with no indication anything
+                  appeared. That's the narrow case where taking focus is
+                  correct — it's a direct response to the user's own action. */}
+              <label htmlFor={`${planEventId}-feedback`} className="sr-only">
+                What would you like to change about this plan?
+              </label>
+              <textarea
+                id={`${planEventId}-feedback`}
+                ref={(node) => node?.focus()}
+                value={feedback}
+                onChange={(e) => setFeedback(e.target.value)}
+                placeholder="What would you like to change about this plan?"
+                disabled={disabled}
+                rows={2}
+                // focus:outline-none previously removed the focus ring and
+                // left only a border tint behind it — restored to the same
+                // focus-visible ring the ui/textarea primitive uses.
+                className="resize-none rounded-md border border-input bg-input/20 px-2 py-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+              />
+            </>
           )}
           <div className="flex justify-end gap-2">
             {showFeedbackInput ? (

@@ -57,7 +57,10 @@ export function PreviewFrame({
         style={maxWidth === undefined ? undefined : { maxWidth }}
       >
         {!frameLoaded && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background">
+          <div
+            role="status"
+            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background"
+          >
             <PingDot />
             <p className="text-sm text-muted-foreground">Loading the app…</p>
           </div>

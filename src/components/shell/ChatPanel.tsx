@@ -22,6 +22,8 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -91,6 +93,7 @@ function DeploymentHistory({ sessionId }: { sessionId?: string | null }) {
             deploymentList.map((d, i) => (
               <DropdownMenuItem
                 key={d.id}
+                // eslint-disable-next-line jsx-a11y/anchor-has-content -- Base UI's `render` prop clones this element with the menu item's children; the anchor is never actually rendered empty.
                 render={<a href={d.url} target="_blank" rel="noopener noreferrer" />}
                 className="flex flex-col items-start gap-0.5"
               >
@@ -127,16 +130,22 @@ function IconAction({
   label,
   onClick,
   disabled,
+  pressed,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick?: () => void;
   disabled?: boolean;
+  /** Set only for toggle-shaped actions (the mic) — renders aria-pressed so
+   * the on/off state is announced. Left undefined for plain actions, where
+   * aria-pressed would wrongly imply a toggle. */
+  pressed?: boolean;
 }) {
   return (
     <Tooltip>
       <TooltipTrigger
         aria-label={label}
+        aria-pressed={pressed}
         onClick={onClick}
         disabled={disabled}
         className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
@@ -206,7 +215,16 @@ function StatusStrip({ jobStatus }: { jobStatus: JobStatus | null }) {
   if (!jobStatus) return null;
   const { label, dot, pulse } = STATUS_STRIP_CONFIG[jobStatus];
   return (
-    <div className="mb-2 flex items-center gap-2 rounded-md bg-secondary/60 px-2.5 py-1.5 text-xs text-muted-foreground">
+    // role="status" (an implicit aria-live="polite" region): the agent's
+    // state is otherwise conveyed only by a colored dot and a text swap
+    // nobody is looking at — a screen-reader user had no way to learn the
+    // run finished, failed, or is waiting on them without re-reading the
+    // panel. Polite, not assertive: these transitions are frequent and
+    // shouldn't interrupt whatever is being read.
+    <div
+      role="status"
+      className="mb-2 flex items-center gap-2 rounded-md bg-secondary/60 px-2.5 py-1.5 text-xs text-muted-foreground"
+    >
       <span className="relative flex size-1.5">
         {pulse && (
           <span
@@ -267,8 +285,12 @@ function ModelPicker({
   const current = models.find((m) => m.id === value) ?? models[0];
   return (
     <DropdownMenu>
+      {/* The name carries the current value: the trigger's visible text is
+          just the model label, so "Choose model" alone left a screen-reader
+          user unable to tell WHICH model is selected without opening the
+          menu. */}
       <DropdownMenuTrigger
-        aria-label="Choose model"
+        aria-label={`Model for this message: ${current.label}`}
         disabled={disabled}
         className="flex items-center gap-1 rounded-full border border-border px-2 py-1 text-[0.7rem] font-medium text-muted-foreground transition-colors hover:bg-secondary disabled:pointer-events-none disabled:opacity-40"
       >
@@ -278,18 +300,24 @@ function ModelPicker({
         <DropdownMenuGroup>
           <DropdownMenuLabel>Model for this message</DropdownMenuLabel>
           <DropdownMenuSeparator />
-          {models.map((m) => (
-            <DropdownMenuItem
-              key={m.id}
-              onSelect={() => onChange(m.id)}
-              className={cn("text-xs", m.id === current.id && "bg-secondary")}
-            >
-              <span className="flex-1">{m.label}</span>
-              <span className="text-[0.65rem] uppercase text-muted-foreground">
-                {m.provider}
-              </span>
-            </DropdownMenuItem>
-          ))}
+          {/* Radio items, not plain menu items: picking a model is a
+              single-select choice, and as plain items the current one was
+              signalled purely by a background tint — invisible to a screen
+              reader and to anyone who can't distinguish that tint. Radio
+              semantics give each row aria-checked plus a visible checkmark. */}
+          <DropdownMenuRadioGroup
+            value={current.id}
+            onValueChange={(next) => onChange(next as string)}
+          >
+            {models.map((m) => (
+              <DropdownMenuRadioItem key={m.id} value={m.id} className="text-xs">
+                <span className="flex-1">{m.label}</span>
+                <span className="text-[0.65rem] uppercase text-muted-foreground">
+                  {m.provider}
+                </span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
         </DropdownMenuGroup>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -459,7 +487,13 @@ export function ChatPanel({
   const planDisabled = jobStatus !== "waiting_on_plan";
 
   return (
-    <aside className="flex h-full min-h-0 w-[440px] shrink-0 flex-col border-r border-border bg-background">
+    // Named landmark: an unnamed <aside> lands in the screen reader's
+    // landmark list as a bare "complementary", indistinguishable from the
+    // preview panel beside it.
+    <aside
+      aria-label="Agent chat"
+      className="flex h-full min-h-0 w-[440px] shrink-0 flex-col border-r border-border bg-background"
+    >
       {/* Timeline */}
       <ScrollArea className="min-h-0 flex-1">
         {events.length === 0 && isLoadingProject ? (
@@ -493,7 +527,18 @@ export function ChatPanel({
             </p>
           </div>
         ) : (
-          <div className="flex flex-col gap-3 px-4 py-4">
+          // role="log" is the ARIA role for exactly this: a running,
+          // chronological transcript where new entries are appended at the
+          // end. It carries an implicit aria-live="polite", so streamed
+          // agent messages are announced as they arrive instead of the
+          // panel silently filling up. aria-relevant="additions" keeps
+          // re-renders of existing rows from re-announcing them.
+          <div
+            role="log"
+            aria-label="Conversation"
+            aria-relevant="additions"
+            className="flex flex-col gap-3 px-4 py-4"
+          >
             <Timeline
               events={events}
               onAnswerQuestion={onAnswerQuestion}
@@ -509,8 +554,14 @@ export function ChatPanel({
 
       {/* Pinned bottom composer */}
       <div className="shrink-0 border-t border-border bg-background p-3">
+        {/* role="alert" (assertive) rather than "status": an error means the
+            thing the user just asked for did not happen, and waiting for a
+            polite gap to say so can leave them typing into a dead composer. */}
         {error && (
-          <div className="mb-2 rounded-md bg-red-500/10 px-2.5 py-1.5 text-xs text-red-400">
+          <div
+            role="alert"
+            className="mb-2 rounded-md bg-red-500/10 px-2.5 py-1.5 text-xs text-red-400"
+          >
             {error}
           </div>
         )}
@@ -533,6 +584,7 @@ export function ChatPanel({
         ) : (
           saveState !== "idle" && (
             <div
+              role={saveState === "error" ? "alert" : "status"}
               className={cn(
                 "mb-2 rounded-md px-2.5 py-1.5 text-xs",
                 saveState === "error"
@@ -549,6 +601,7 @@ export function ChatPanel({
 
         {deployState !== "idle" && (
           <div
+            role={deployState === "error" ? "alert" : "status"}
             className={cn(
               "mb-2 rounded-md px-2.5 py-1.5 text-xs",
               deployState === "error"
@@ -563,7 +616,18 @@ export function ChatPanel({
         )}
 
         <div className="rounded-lg border border-input bg-input/20 p-2 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50">
+          {/* A placeholder is NOT an accessible name — it's a hint, it
+              disappears the moment you type, and several browser/AT combos
+              never expose it at all. This textarea is the single most
+              important control in the app, so it gets a real name plus a
+              described-by hint spelling out the Enter/Shift+Enter keys,
+              which were otherwise discoverable only by experiment. */}
+          <label htmlFor="chat-composer" className="sr-only">
+            Message the agent
+          </label>
           <Textarea
+            id="chat-composer"
+            aria-describedby="chat-composer-hint"
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -577,6 +641,9 @@ export function ChatPanel({
             disabled={composerDisabled}
             className="min-h-16 resize-none border-none bg-transparent p-1 shadow-none focus-visible:ring-0 disabled:opacity-50"
           />
+          <span id="chat-composer-hint" className="sr-only">
+            Press Enter to send, Shift plus Enter for a new line.
+          </span>
           <div className="flex items-center justify-between pt-1">
             <div className="flex items-center gap-0.5">
               <IconAction
@@ -605,6 +672,7 @@ export function ChatPanel({
                       : "Voice input"
                     : "Voice input isn't supported in this browser"
                 }
+                pressed={isVoiceSupported ? isListening : undefined}
                 onClick={handleMicClick}
                 disabled={!isVoiceSupported || composerDisabled}
               />
@@ -620,7 +688,8 @@ export function ChatPanel({
             {canContinueChat && (
               <Tooltip>
                 <TooltipTrigger
-                  aria-label="Toggle Plan mode"
+                  aria-label="Plan mode"
+                  aria-pressed={planMode}
                   onClick={() => setPlanMode((prev) => !prev)}
                   disabled={composerDisabled}
                   className={cn(

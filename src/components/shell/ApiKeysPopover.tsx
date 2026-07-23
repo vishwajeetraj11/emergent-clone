@@ -49,6 +49,11 @@ export function ApiKeysPopover({
     return Boolean(stored.anthropic || stored.openai);
   });
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Focus management for the panel (see the effect below). `triggerRef` is
+  // where focus goes back to on close; `firstFieldRef` is where it lands on
+  // open.
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const firstFieldRef = useRef<HTMLInputElement | null>(null);
 
   /**
    * Re-syncs the draft fields from storage right as the popover opens (not
@@ -77,15 +82,33 @@ export function ApiKeysPopover({
       }
     }
     function onEscape(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      // Escape must not strand focus on a node that just unmounted —
+      // browsers reset it to <body>, which drops a keyboard user back at the
+      // top of the document. Put it back where they opened this from.
+      triggerRef.current?.focus();
     }
     document.addEventListener("mousedown", onOutsideClick);
     document.addEventListener("keydown", onEscape);
+    // Pull focus into the panel on open. Without it the panel appears
+    // visually but focus stays on the trigger, so the next Tab continues
+    // past it into the rest of the composer and the fields are only
+    // reachable by shift-tabbing backwards from somewhere unrelated.
+    firstFieldRef.current?.focus();
     return () => {
       document.removeEventListener("mousedown", onOutsideClick);
       document.removeEventListener("keydown", onEscape);
     };
   }, [open]);
+
+  /** Closes the panel and hands focus back to the trigger — same reason as
+   * the Escape handler above: the panel unmounts, and focus left on a
+   * removed node falls back to <body>. */
+  function closeAndRestoreFocus() {
+    setOpen(false);
+    triggerRef.current?.focus();
+  }
 
   function handleSave() {
     const next: UserApiKeys = {};
@@ -96,7 +119,7 @@ export function ApiKeysPopover({
     saveUserApiKeys(next);
     setHasAnyKey(Boolean(next.anthropic || next.openai));
     onChange?.(next);
-    setOpen(false);
+    closeAndRestoreFocus();
   }
 
   function handleClear() {
@@ -110,8 +133,22 @@ export function ApiKeysPopover({
   return (
     <div ref={containerRef} className="relative">
       <IconButton
-        label="Your API keys (BYOK)"
+        ref={triggerRef}
+        // The name carries the stored-key state, because `active` can't:
+        // it means "a key is stored", NOT "this popover is open", and
+        // IconButton renders it as aria-pressed — which, on a control that
+        // opens a panel, reads as the open state and contradicts
+        // aria-expanded. So aria-pressed is suppressed here and the fact
+        // moves into the label, where it can't be misread.
+        label={
+          hasAnyKey
+            ? "Your API keys (BYOK) — a key is saved"
+            : "Your API keys (BYOK) — no key saved"
+        }
         active={hasAnyKey}
+        aria-pressed={undefined}
+        aria-haspopup="dialog"
+        aria-expanded={open}
         // See hasAnyKey's lazy initializer above for why this one attribute
         // can legitimately differ between the server-rendered HTML and this
         // component's first client render.
@@ -128,9 +165,19 @@ export function ApiKeysPopover({
         >
           <p className="mb-2 text-xs font-medium text-foreground">Your API keys</p>
           <div className="flex flex-col gap-2">
-            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            {/* Explicit htmlFor/id rather than relying on the label
+                wrapping the control: <Input> is a component, so nothing —
+                not the linter, and not every AT implementation walking a
+                portal'd or wrapped DOM — can be sure a real <input> ends up
+                inside. An id pairing is unambiguous either way. */}
+            <label
+              htmlFor="byok-anthropic-key"
+              className="flex flex-col gap-1 text-xs text-muted-foreground"
+            >
               Anthropic API key
               <Input
+                id="byok-anthropic-key"
+                ref={firstFieldRef}
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
@@ -139,9 +186,13 @@ export function ApiKeysPopover({
                 placeholder="sk-ant-…"
               />
             </label>
-            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            <label
+              htmlFor="byok-openai-key"
+              className="flex flex-col gap-1 text-xs text-muted-foreground"
+            >
               OpenAI API key
               <Input
+                id="byok-openai-key"
                 type="password"
                 autoComplete="off"
                 spellCheck={false}

@@ -49,7 +49,12 @@ export function AppShell({ initialProjectId }: { initialProjectId?: string }) {
         onSelectProject={(id) => router.push(`/p/${id}`)}
         onRenameProject={session.renameProject}
       />
-      <main className="flex min-h-0 flex-1">
+      {/* id + tabIndex back the layout's skip link: focusing a <main> that
+          isn't natively focusable would otherwise move the *scroll* there
+          without moving the *focus*, so the next Tab would restart from the
+          top of the page. -1 makes it programmatically focusable only, never
+          a tab stop of its own. */}
+      <main id="main-content" tabIndex={-1} className="flex min-h-0 flex-1 outline-none">
         <ChatPanel
           events={session.events}
           jobStatus={session.jobStatus}

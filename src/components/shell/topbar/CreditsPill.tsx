@@ -25,8 +25,18 @@ export function CreditsPill({ jobStatus }: { jobStatus?: JobStatus | null }) {
 
   return (
     <Tooltip>
+      {/* aria-label overrides the button's text content, so the flat "Buy
+          credits" was actively hiding the balance the pill exists to show —
+          a screen-reader user could never hear how many credits they had.
+          The name now carries it. */}
       <TooltipTrigger
-        aria-label="Buy credits"
+        aria-label={
+          isBalanceLoading
+            ? "Buy credits — loading your balance"
+            : balance !== null
+              ? `Buy credits — you have ${balance.toLocaleString()} credits`
+              : "Buy credits"
+        }
         onClick={buyCredits}
         disabled={isLoading}
         className="flex h-7 items-center gap-1.5 rounded-[min(var(--radius-md),12px)] bg-yellow-400 px-2.5 text-[0.8rem] font-medium text-yellow-950 transition-colors hover:bg-yellow-300 disabled:pointer-events-none disabled:opacity-50"
@@ -41,11 +51,18 @@ export function CreditsPill({ jobStatus }: { jobStatus?: JobStatus | null }) {
             avatar beside it. rounded-full, not rounded-sm, because the pill
             itself is 28px tall with a 12px radius (nearly pill-shaped), and a
             sharp-cornered bar inside it reads as the shape changing on load. */}
+        {/* aria-label on a bare <span> is not reliably exposed (no role, no
+            content) — several screen readers ignore it outright. Real
+            sr-only text says the same thing and always reaches the user;
+            the pulsing bar itself is decoration and is hidden. */}
         {isBalanceLoading ? (
-          <span
-            aria-label="Loading credit balance"
-            className="inline-block h-3 w-[68px] animate-pulse rounded-full bg-yellow-950/20"
-          />
+          <>
+            <span className="sr-only">Loading credit balance</span>
+            <span
+              aria-hidden
+              className="inline-block h-3 w-[68px] animate-pulse rounded-full bg-yellow-950/20"
+            />
+          </>
         ) : balance !== null ? (
           `${balance.toLocaleString()} credits`
         ) : (
