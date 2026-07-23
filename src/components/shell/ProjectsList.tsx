@@ -123,32 +123,55 @@ export function ProjectsList({
       <h3 className="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
         Your projects
       </h3>
-      {deleteError && <p className="mb-1.5 px-1 text-xs text-red-400">{deleteError}</p>}
-      <div className="flex max-h-64 flex-col gap-1.5 overflow-y-auto">
+      {deleteError && (
+        <p role="alert" className="mb-1.5 px-1 text-xs text-red-400">
+          {deleteError}
+        </p>
+      )}
+      {/* A real list. The rows used to be role="button" divs with more
+          buttons nested inside them — invalid (a control inside a control),
+          and it left the delete/confirm buttons unreachable or ambiguous
+          depending on the screen reader. Now: <ul>/<li> for structure, and
+          the row's own "open this project" affordance is a real <button>
+          that stretches across the row via an absolutely-positioned overlay,
+          so the visual full-row hit area survives while the delete controls
+          stay siblings rather than descendants. */}
+      <ul className="flex max-h-64 list-none flex-col gap-1.5 overflow-y-auto">
         {projects.map((p) => (
-          <div
+          <li
             key={p.id}
-            role="button"
-            tabIndex={0}
-            onClick={() => onSelectProject(p.id)}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter" && e.key !== " ") return;
-              e.preventDefault();
-              onSelectProject(p.id);
-            }}
-            className="group flex items-center justify-between gap-3 rounded-md border border-border bg-secondary/30 px-3 py-2 text-left text-sm transition-colors hover:bg-secondary/60"
+            className="group relative flex items-center justify-between gap-3 rounded-md border border-border bg-secondary/30 px-3 py-2 text-left text-sm transition-colors hover:bg-secondary/60"
           >
-            <span className="truncate text-foreground">{p.name}</span>
+            {/* The focus ring lives on the overlay button, not on the row via
+                focus-within — otherwise focusing the delete button would
+                light up the whole row and read as "the row is focused". */}
+            <button
+              type="button"
+              onClick={() => onSelectProject(p.id)}
+              className="absolute inset-0 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span className="sr-only">Open project {p.name}</span>
+            </button>
+            {/* aria-hidden: the visible name is already announced by the
+                overlay button's accessible name above, and reading it twice
+                is noise. */}
+            <span aria-hidden className="truncate text-foreground">
+              {p.name}
+            </span>
             {confirmingId === p.id ? (
-              <div className="flex shrink-0 items-center gap-1.5 text-xs">
-                <span className="text-muted-foreground">Delete?</span>
+              // relative z-10 lifts these above the row's full-bleed overlay
+              // button so clicks land here, not on "open project".
+              // "Yes"/"No" alone are meaningless out of context, so each
+              // carries an aria-label naming the project and the action.
+              <div className="relative z-10 flex shrink-0 items-center gap-1.5 text-xs">
+                <span aria-hidden className="text-muted-foreground">
+                  Delete?
+                </span>
                 <button
                   type="button"
                   disabled={deletingId === p.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDelete(p.id);
-                  }}
+                  aria-label={`Confirm deleting ${p.name}`}
+                  onClick={() => handleDelete(p.id)}
                   className="rounded-sm px-1 py-0.5 font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50"
                 >
                   {deletingId === p.id ? "…" : "Yes"}
@@ -156,37 +179,36 @@ export function ProjectsList({
                 <button
                   type="button"
                   disabled={deletingId === p.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setConfirmingId(null);
-                  }}
+                  aria-label={`Keep ${p.name}`}
+                  onClick={() => setConfirmingId(null)}
                   className="rounded-sm px-1 py-0.5 text-muted-foreground transition-colors hover:bg-muted disabled:opacity-50"
                 >
                   No
                 </button>
               </div>
             ) : (
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="relative z-10 flex shrink-0 items-center gap-2">
                 <span className="text-xs text-muted-foreground">
                   {formatDate(p.createdAt)}
                 </span>
+                {/* opacity-0 + group-hover:opacity-100 made this button
+                    mouse-only: a keyboard user could focus it while it was
+                    still fully transparent, i.e. focus vanished from the
+                    screen. focus-visible:opacity-100 reveals it on focus too. */}
                 <button
                   type="button"
                   aria-label={`Delete ${p.name}`}
                   title="Delete project"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setConfirmingId(p.id);
-                  }}
-                  className="rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-red-400 group-hover:opacity-100"
+                  onClick={() => setConfirmingId(p.id)}
+                  className="rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-red-400 focus-visible:opacity-100 group-hover:opacity-100"
                 >
                   <Trash2 className="size-3.5" />
                 </button>
               </div>
             )}
-          </div>
+          </li>
         ))}
-      </div>
+      </ul>
     </div>
   );
 }

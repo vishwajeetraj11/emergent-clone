@@ -60,17 +60,28 @@ export function Timeline({
           case "user_message": {
             const text = (event.payload as { text?: string }).text ?? "";
             return (
+              // Who said what is conveyed purely by alignment and bubble
+              // color — both invisible to a screen reader, which would
+              // otherwise read the whole transcript as one undifferentiated
+              // wall of text. An sr-only speaker prefix restores the
+              // attribution without changing a pixel.
               <div
                 key={`${event.jobId}-${event.seq}`}
                 className="self-end whitespace-pre-wrap rounded-lg bg-secondary px-3 py-2 text-sm text-foreground"
               >
+                <span className="sr-only">You said: </span>
                 {text}
               </div>
             );
           }
           case "assistant_message": {
             const text = (event.payload as { text?: string }).text ?? "";
-            return <Markdown key={`${event.jobId}-${event.seq}`} text={text} />;
+            return (
+              <div key={`${event.jobId}-${event.seq}`}>
+                <span className="sr-only">Agent said: </span>
+                <Markdown text={text} />
+              </div>
+            );
           }
           case "status": {
             const text = (event.payload as { text?: string }).text ?? "";
@@ -79,7 +90,9 @@ export function Timeline({
                 key={`${event.jobId}-${event.seq}`}
                 className="flex items-center gap-2 text-xs text-muted-foreground"
               >
-                <span className="relative flex size-1.5 shrink-0">
+                {/* Purely decorative pulse — announcing it would prefix every
+                    status line with a meaningless blank element. */}
+                <span className="relative flex size-1.5 shrink-0" aria-hidden>
                   <span className="absolute inline-flex size-full animate-ping rounded-full bg-muted-foreground/60 opacity-75" />
                   <span className="relative inline-flex size-1.5 rounded-full bg-muted-foreground" />
                 </span>
@@ -153,6 +166,7 @@ export function Timeline({
             return (
               <div
                 key={`${event.jobId}-${event.seq}`}
+                role="alert"
                 className="rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-400"
               >
                 {message}

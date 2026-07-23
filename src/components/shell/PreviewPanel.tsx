@@ -58,7 +58,9 @@ export function PreviewPanel({
   const [viewport, setViewport] = useState<Viewport>("desktop");
 
   return (
-    <section className="flex h-full flex-1 flex-col bg-background">
+    // Named: an unnamed <section> is not exposed as a landmark at all, so
+    // this whole half of the app was missing from the landmark list.
+    <section aria-label="App preview" className="flex h-full flex-1 flex-col bg-background">
       <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border px-4">
         <div className="flex min-w-0 items-center gap-3">
           <span className="shrink-0 text-sm font-medium text-foreground">
@@ -91,7 +93,10 @@ export function PreviewPanel({
       </header>
 
       {isRestoring ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        <div
+          role="status"
+          className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center"
+        >
           <PingDot />
           <p className="text-sm text-muted-foreground">{RESTORING_PREVIEW_MESSAGE}</p>
         </div>
@@ -106,7 +111,7 @@ export function PreviewPanel({
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
           {restoreError && (
-            <p className="max-w-sm text-center text-xs text-red-400">
+            <p role="alert" className="max-w-sm text-center text-xs text-red-400">
               Couldn&apos;t restore the sandbox: {restoreError}
             </p>
           )}

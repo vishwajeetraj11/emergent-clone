@@ -106,14 +106,14 @@ export function ProjectTabs({
       {tabs.map((tab) => {
         const isActive = tab.id === activeTab;
         return (
+          // Was a role="button" div with tabIndex=0 and NO onKeyDown — it
+          // announced itself as a button and then did nothing on Enter or
+          // Space, so the project tab was simply not operable by keyboard.
+          // It also nested a real <button> (close) inside that fake one,
+          // which is invalid. Now a plain container holding two real
+          // sibling buttons.
           <div
             key={tab.id}
-            role="button"
-            tabIndex={0}
-            onClick={() => {
-              setActiveOverride(tab.id);
-              onSelectProject?.(tab.id);
-            }}
             className={cn(
               "group flex shrink-0 items-center gap-2 rounded-t-md border border-b-0 border-border px-3 py-1.5 text-xs transition-colors",
               isActive
@@ -126,44 +126,65 @@ export function ProjectTabs({
               aria-hidden
             />
             {renamingId === tab.id ? (
-              <input
-                autoFocus
-                value={renameValue}
-                disabled={isSavingRename}
-                onClick={(e) => e.stopPropagation()}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onBlur={() => commitRename(tab.name)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    commitRename(tab.name);
-                  } else if (e.key === "Escape") {
-                    e.preventDefault();
-                    setRenamingId(null);
-                  }
-                }}
-                className="w-28 rounded-sm bg-transparent px-0.5 text-xs outline-none ring-1 ring-ring/50 disabled:opacity-50"
-              />
+              <>
+                <label htmlFor={`rename-${tab.id}`} className="sr-only">
+                  Rename project
+                </label>
+                {/* Callback ref rather than autoFocus (which jsx-a11y
+                    rejects, since it also fires on initial page load): this
+                    input only appears in response to the user's own
+                    double-click/F2, and not focusing it would leave them
+                    unable to type into the thing they just opened. */}
+                <input
+                  id={`rename-${tab.id}`}
+                  ref={(node) => node?.focus()}
+                  value={renameValue}
+                  disabled={isSavingRename}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onBlur={() => commitRename(tab.name)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      commitRename(tab.name);
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      setRenamingId(null);
+                    }
+                  }}
+                  className="w-28 rounded-sm bg-transparent px-0.5 text-xs outline-none ring-1 ring-ring/50 disabled:opacity-50"
+                />
+              </>
             ) : (
-              <span
-                className="max-w-40 truncate"
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
+              // aria-current marks which tab is the open one — previously
+              // conveyed only by background color. F2 is the keyboard
+              // equivalent of the double-click rename, which had no keyboard
+              // path at all; the title/hint names both.
+              <button
+                type="button"
+                aria-current={isActive ? "page" : undefined}
+                onClick={() => {
+                  setActiveOverride(tab.id);
+                  onSelectProject?.(tab.id);
+                }}
+                onDoubleClick={() => startRenaming(tab)}
+                onKeyDown={(e) => {
+                  if (e.key !== "F2" || !onRenameProject) return;
+                  e.preventDefault();
                   startRenaming(tab);
                 }}
-                title={onRenameProject ? "Double-click to rename" : undefined}
+                title={onRenameProject ? "Double-click (or press F2) to rename" : undefined}
+                className="max-w-40 truncate rounded-sm"
               >
                 {tab.name}
-              </span>
+              </button>
             )}
+            {/* opacity-0 until group-hover left this invisible while focused
+                — focus-visible:opacity-100 makes the keyboard path visible. */}
             <button
               type="button"
               aria-label={`Close ${tab.name}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                closeTab(tab.id);
-              }}
-              className="rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+              onClick={() => closeTab(tab.id)}
+              className="rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
             >
               <X className="size-3" />
             </button>

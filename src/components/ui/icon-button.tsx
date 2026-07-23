@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import type { ComponentPropsWithRef } from "react";
 import { cn } from "@/lib/utils";
 
 const ICON_BUTTON_CLASSES =
@@ -10,6 +10,10 @@ const ICON_BUTTON_CLASSES =
  * toggle, reload, close). `label` doubles as the accessible name and the
  * native title tooltip; `active` applies the pressed/selected styling used
  * by segmented-control-style buttons (e.g. the viewport toggle).
+ *
+ * Props spread onto the underlying <button>, `ref` included (React 19 treats
+ * ref as an ordinary prop on function components) — callers that need to
+ * restore focus to this button use it, e.g. ApiKeysPopover on Escape.
  */
 export function IconButton({
   label,
@@ -20,7 +24,7 @@ export function IconButton({
 }: {
   label: string;
   active?: boolean;
-} & ButtonHTMLAttributes<HTMLButtonElement>) {
+} & ComponentPropsWithRef<"button">) {
   return (
     <button
       type="button"

@@ -47,7 +47,12 @@ export function LandingPage() {
         </div>
       </header>
 
-      <main className="flex flex-1 flex-col items-center justify-center px-6 pb-24 text-center">
+      {/* Skip-link target — see src/app/layout.tsx. */}
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="flex flex-1 flex-col items-center justify-center px-6 pb-24 text-center outline-none"
+      >
         <div className="mb-6 inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary/50 px-3 py-1 text-xs text-muted-foreground">
           <Sparkles className="size-3.5" />
           Chat with an agent that ships real apps

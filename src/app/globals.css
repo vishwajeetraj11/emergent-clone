@@ -127,4 +127,40 @@
   html {
     @apply font-sans;
   }
+
+  /*
+   * Accessibility baseline.
+   *
+   * 1. Keyboard focus must always be visible. Several controls here style
+   *    focus themselves (see ui/button.tsx's focus-visible:ring-3), but a lot
+   *    of the shell's hand-rolled buttons don't — and `outline: none` from a
+   *    reset with nothing put back is the single most common way a UI becomes
+   *    keyboard-unusable. This is the floor: anything focused via the
+   *    keyboard gets a ring even if the component forgot. Components that DO
+   *    style their own focus still win, since their utilities land in a later
+   *    layer than `base`.
+   *
+   * 2. Motion. The shell leans on animate-ping / animate-pulse (status dots,
+   *    skeletons, thinking indicator) and an auto-advancing carousel. For
+   *    users who set prefers-reduced-motion those are a vestibular trigger,
+   *    so all animation and smooth scrolling collapses to effectively
+   *    instant. `!important` is deliberate: it has to beat Tailwind's own
+   *    animate-* utilities, which are more specific than anything writable
+   *    here. The JS side honors the same signal where a CSS override isn't
+   *    enough (see OnboardingCarousel's auto-advance).
+   */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-ring;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
