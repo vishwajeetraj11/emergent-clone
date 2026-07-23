@@ -3,19 +3,11 @@ import { getDb } from "@/db";
 import { deployments, sessions } from "@/db/schema";
 import { getSessionFiles } from "@/server/files";
 
-// ---------------------------------------------------------------------------
-// Vercel deploy ("Deploy Your Application" —
-// the onboarding carousel slide in src/components/shell/PreviewPanel.tsx).
-// Same pattern as Clerk (src/lib/auth.ts) and GitHub (src/server/github-app.ts):
-// isVercelConfigured() gates everything else in this file, real Vercel REST
-// API usage underneath (POST /v13/deployments — verified against Vercel's
-// current documented API, not guessed), inert/clear-error behavior when
-// unconfigured.
+// Vercel deploy ("Deploy Your Application"). isVercelConfigured() gates
+// everything in this file; unconfigured means a clear error, not a crash.
 //
-// No VERCEL_TOKEN exists in this environment. Code-complete against
-// Vercel's current documented REST API, NOT live-verified — no real token
-// here.
-// ---------------------------------------------------------------------------
+// Written against Vercel's documented REST API (POST /v13/deployments) but
+// NOT live-verified — no real token has ever run through this path.
 
 export function isVercelConfigured(): boolean {
   return Boolean(process.env.VERCEL_TOKEN);

@@ -11,26 +11,17 @@ import {
 import { MODEL_CATALOG, getModelInfo, type ModelInfo } from "@/lib/models";
 import type { UserApiKeys } from "@/server/user-keys";
 
-// ---------------------------------------------------------------------------
-// Provider-agnostic LLM runtime (Vercel AI SDK) — replaces the Claude Agent
-// SDK/`claude` CLI. Providers are env-gated with the same isXConfigured()
-// idiom as GitHub/Neon/Vercel: a provider with no API key simply doesn't
-// exist — its models are filtered out of the picker (getAvailableModels) and
-// resolveModel throws a clear error if something still asks for one.
+// Provider-agnostic LLM runtime (Vercel AI SDK). Providers are env-gated: one
+// with no API key doesn't exist — its models are filtered out of the picker and
+// resolveModel throws if something still asks for one. Anthropic is metered API
+// only; with no key, Claude models are hidden and the planner falls back to the
+// strongest OpenAI model.
 //
-// NOTE the cost-model change this implies for Anthropic: the old CLI rode
-// the local `claude login` subscription; this runtime uses the metered API
-// via ANTHROPIC_API_KEY. No key -> Claude models hidden, planner falls back
-// to the strongest OpenAI model (resolvePlannerModel).
-//
-// BYOK (see src/server/user-keys.ts): every resolver below optionally takes
-// `keys`, a job's user-supplied provider key(s). A user key WIDENS
-// availability (a provider with no platform env key still counts as
-// available once a user key exists for it) and, in resolveModel, TAKES
-// PRECEDENCE over the platform's env key when both exist — that precedence
-// is what makes "the user's build bills their key" true rather than a
-// fallback that only ever matters when the platform has nothing configured.
-// ---------------------------------------------------------------------------
+// BYOK (src/server/user-keys.ts): a user key WIDENS availability (a provider
+// with no platform key counts as available once a user key exists) and TAKES
+// PRECEDENCE over the platform key when both exist. That precedence is what
+// makes "the user's build bills their key" true, rather than a fallback that
+// only matters when the platform has nothing configured.
 
 export function isAnthropicConfigured(): boolean {
   return Boolean(process.env.ANTHROPIC_API_KEY);

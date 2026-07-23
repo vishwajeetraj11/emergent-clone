@@ -11,36 +11,25 @@ import {
   sessionFileKey,
 } from "@/server/r2";
 
-// ---------------------------------------------------------------------------
-// Sandbox snapshot -> `files` table INDEX + Cloudflare R2 bytes, used by the
-// build phase (src/server/agent-phases.ts) after the build/debug agent edits
-// the VM, and read back by GET /api/sessions/[id]/files for the file viewer.
+// Sandbox snapshot -> `files` index rows + Cloudflare R2 bytes.
 //
-// The agent builds INSIDE the session's Vercel sandbox (see
-// src/server/agent-tools.ts), so snapshotSessionFiles reads the file tree from
-// that live VM (find + readFileToBuffer), not the emergent server's disk.
+// The agent builds INSIDE the session's Vercel sandbox, so snapshotSessionFiles
+// reads the tree from that live VM, not this server's disk.
 //
-// "R2 = bytes, DB = index" (see src/server/r2.ts + the files-table comment in
-// src/db/schema.ts): a changed file's bytes go to R2 under
+// "R2 = bytes, DB = index": a changed file's bytes go to R2 under
 // sessions/<sessionId>/<path>, its row stores only {path, hash}. R2 is
-// REQUIRED — putTextObject/getTextObject throw when it's unconfigured, so a
-// build without R2 fails loudly rather than silently losing files.
-// getSessionFiles hydrates the bytes back into the SessionFile
-// { path, content, updatedAt } contract, so its consumers are unchanged.
-// ---------------------------------------------------------------------------
+// REQUIRED — put/getTextObject throw when unconfigured, so a build without it
+// fails loudly rather than silently losing files.
 
 // The sandbox's working directory (matches APP_DIR in agent-tools.ts).
 const APP_DIR = "/vercel/sandbox";
 
-// Secret-bearing env files never leave the sandbox: the session's own
-// DATABASE_URL lives in `.env.local` (written by src/server/project-db.ts),
-// and the `files` table feeds the file viewer, GitHub export, Vercel deploys,
-// and fork copies — none of which may carry a live connection string.
+// Secret-bearing env files never leave the sandbox: `.env.local` holds the
+// session's live DATABASE_URL, and this table feeds the file viewer, GitHub
+// export, Vercel deploys, and fork copies.
 const EXCLUDED_FILES = new Set([".env", ".env.local"]);
 
-// Best-effort binary skip list — file content is stored/transferred as text
-// (R2 utf-8 object), so we don't want to jam raw binary bytes (mangled by the
-// utf8 decode) into it.
+// Content is stored as text (utf-8 R2 objects), so binary would be mangled.
 const BINARY_EXTENSIONS = new Set([
   ".png",
   ".jpg",

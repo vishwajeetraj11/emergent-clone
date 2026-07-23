@@ -2,32 +2,18 @@ import { eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { creditLedger, jobs, projects, sessions } from "@/db/schema";
 
-// ---------------------------------------------------------------------------
 // Credit ledger accounting.
 //
-// The `credit_ledger` table has existed from the start (userId, delta, reason,
-// jobId) but nothing ever wrote real rows into it — this file is what turns
-// it into an actual accounting system. Every `usage` event appended by the
-// agent loop (src/server/agent.ts, logged from the start) now produces a
-// matching negative ledger row via debitForJobUsage, called right after each
-// `appendEvent(jobId, "system", "usage", ...)`. Debiting happens
-// incrementally, per usage event, not via a full-history recompute — cheap
-// and correct as long as every usage event is debited exactly once (true
-// here: each call site calls this exactly once per usage event it emits).
+// Every `usage` event the agent loop appends produces a matching negative
+// ledger row via debitForJobUsage. Debiting is incremental, per usage event,
+// not a full-history recompute — correct only as long as each usage event is
+// debited exactly once, which every call site upholds.
 //
-// COST MODEL (the only place these constants live — change here, nowhere
-// else): 1 credit = $0.01 USD. Token costs below are each model's standard
-// published per-token pricing (confirmed against
-// https://platform.claude.com/docs/en/about-claude/pricing) as of this
-// phase. This is a simple, directly-traceable-to-real-pricing model; a
-// production system might add markup, but this phase intentionally prices
-// at cost.
-//
-// Orchestration (src/server/agent.ts) now runs the planner on
-// claude-opus-4-8 and the builder/reviewer/debugger on claude-sonnet-5 —
-// materially different per-token rates, so cost must be computed per the
-// actual model used for each call, not one flat rate for every call.
-// ---------------------------------------------------------------------------
+// COST MODEL — the only place these constants live. 1 credit = $0.01 USD, and
+// token costs are each model's published per-token pricing, deliberately at
+// cost with no markup. Rates differ materially between the planner (Opus) and
+// the builder/reviewer/debugger (Sonnet), so cost is computed per the model
+// that actually ran each call rather than one flat rate.
 
 /** 1 credit = $0.01 USD. The unit the UI and ledger both speak in. */
 export const CREDITS_PER_USD = 100;
