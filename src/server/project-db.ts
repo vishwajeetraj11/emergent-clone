@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
 import path from "node:path";
@@ -188,22 +189,75 @@ export async function ensureSessionDatabase(sessionId: string): Promise<string |
 }
 
 /**
- * Writes the session's DATABASE_URL into `<dir>/.env.local` so the generated
- * app's `next dev` picks it up natively. No-op (and no file written) when
- * Neon isn't configured or provisioning fails — a database problem must
- * never block a sandbox from starting, since most generated apps don't use
- * one at all. Errors are logged, not thrown.
+ * Ensures `sessionId` has its own auth signing secret, generating + persisting
+ * one on first need. Same shape/gating as ensureSessionDatabase: no Neon means
+ * no DB-backed auth, so no secret is needed and this returns null. Idempotent
+ * and safe to call on every sandbox start — a stored secret short-circuits.
+ *
+ * The secret is 32 random bytes (crypto.randomBytes, never Math.random),
+ * base64url-encoded (URL/header-safe, ≥43 chars). It reaches the generated app
+ * as BETTER_AUTH_SECRET in `.env.local` (buildSandboxEnvContent below) and must
+ * stay STABLE across resumes — better-auth signs session cookies with it, so a
+ * rotation would silently log everyone out. Returns the session's secret, or
+ * null when Neon isn't configured.
+ */
+export async function ensureSessionAuthSecret(sessionId: string): Promise<string | null> {
+  if (!isNeonConfigured()) return null;
+
+  const db = getDb();
+  const [session] = await db
+    .select({ authSecret: sessions.authSecret })
+    .from(sessions)
+    .where(eq(sessions.id, sessionId));
+  if (!session) return null;
+  if (session.authSecret) return session.authSecret;
+
+  const secret = randomBytes(32).toString("base64url");
+  await db.update(sessions).set({ authSecret: secret }).where(eq(sessions.id, sessionId));
+  return secret;
+}
+
+/**
+ * Builds the full `.env.local` body injected into the sandbox — the single
+ * source of truth for that file so its lines can never drift between the three
+ * writers that emit it (writeSandboxEnvFile here, plus the onCreate and
+ * resume-refresh paths in src/server/sandbox-vercel.ts). Returns null when the
+ * session has no provisioned database (Neon unconfigured, or provisioning
+ * failed), which is exactly the "don't write a file" signal every caller wants.
+ *
+ * Emits DATABASE_URL, plus the auth signing secret under BOTH BETTER_AUTH_SECRET
+ * (the name better-auth reads) and AUTH_SECRET (a harmless alias that
+ * future-proofs a hand-roll or an Auth.js fallback without touching this
+ * helper). Both carry the same value from ensureSessionAuthSecret.
+ */
+export async function buildSandboxEnvContent(sessionId: string): Promise<string | null> {
+  const url = await ensureSessionDatabase(sessionId);
+  if (!url) return null;
+  const secret = await ensureSessionAuthSecret(sessionId);
+  const lines = [
+    "# Auto-generated — this app's own Postgres database + auth secret. Not snapshotted or exported.",
+    `DATABASE_URL=${url}`,
+  ];
+  if (secret) {
+    lines.push(`BETTER_AUTH_SECRET=${secret}`, `AUTH_SECRET=${secret}`);
+  }
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Writes the session's `.env.local` (DATABASE_URL + auth secret, see
+ * buildSandboxEnvContent) into `<dir>` so the generated app's `next dev` picks
+ * it up natively. No-op (and no file written) when Neon isn't configured or
+ * provisioning fails — a database problem must never block a sandbox from
+ * starting, since most generated apps don't use one at all. Errors are logged,
+ * not thrown.
  */
 export async function writeSandboxEnvFile(sessionId: string, dir: string): Promise<void> {
   if (!isNeonConfigured()) return;
   try {
-    const url = await ensureSessionDatabase(sessionId);
-    if (!url) return;
-    writeFileSync(
-      path.join(dir, ".env.local"),
-      `# Auto-generated — this app's own Postgres database. Not snapshotted or exported.\nDATABASE_URL=${url}\n`,
-      "utf8"
-    );
+    const content = await buildSandboxEnvContent(sessionId);
+    if (!content) return;
+    writeFileSync(path.join(dir, ".env.local"), content, "utf8");
   } catch (err) {
     console.error(`[project-db] provisioning database for session ${sessionId} failed`, err);
   }

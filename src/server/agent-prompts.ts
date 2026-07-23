@@ -77,15 +77,26 @@ Fix each issue listed in your prompt. Read whatever files you need to understand
 
 export const PLANNER_DB_NOTE = `
 
-Database: every app built here gets its own dedicated Postgres database, reachable by the app's server-side code at runtime via process.env.DATABASE_URL. If the app needs persistence (accounts, saved items, submissions…), plan on real Postgres storage rather than in-memory or localStorage-only state — the builder agent knows how to wire it up.`;
+Database: every app built here gets its own dedicated Postgres database, reachable by the app's server-side code at runtime via process.env.DATABASE_URL. If the app needs persistence (accounts, saved items, submissions…), plan on real Postgres storage rather than in-memory or localStorage-only state — the builder agent knows how to wire it up.
+
+Auth: if the app needs user accounts / login, it will be real database-backed email-and-password auth (the builder agent uses better-auth against that same Postgres database). Scope auth as email/password only — do NOT propose "Sign in with Google" or other OAuth/social login as options, since the live preview runs on an ephemeral URL with no OAuth credentials. Frame any auth question around email/password accounts.`;
 
 export const BUILD_DB_NOTE = `
 
-Database: this app has its own dedicated Postgres database. Its connection string should already be in \`.env.local\` in the working directory as DATABASE_URL — \`next dev\` loads that file automatically, so server-side code can just use process.env.DATABASE_URL. If the app needs persistence: install a driver yourself via Bash (e.g. \`npm install postgres\`), create tables idempotently (CREATE TABLE IF NOT EXISTS) on first use, and query from server components / route handlers only — never from client components. If \`.env.local\` is missing, the database wasn't provisioned; build without persistence rather than inventing a connection string. Never print, hardcode, or commit the connection string, and never overwrite or delete \`.env.local\`.`;
+Database: this app has its own dedicated Postgres database. Its connection string should already be in \`.env.local\` in the working directory as DATABASE_URL — \`next dev\` loads that file automatically, so server-side code can just use process.env.DATABASE_URL. If the app needs persistence: install a driver yourself via Bash (e.g. \`npm install postgres\`), create tables idempotently (CREATE TABLE IF NOT EXISTS) on first use, and query from server components / route handlers only — never from client components. If \`.env.local\` is missing, the database wasn't provisioned; build without persistence rather than inventing a connection string. Never print, hardcode, or commit the connection string, and never overwrite or delete \`.env.local\`.
+
+Auth: when the app needs user accounts / login, build REAL database-backed email-and-password auth using better-auth — never a localStorage/cookie mock or a hand-rolled password scheme. Wire it exactly like this:
+- Install the library and its Postgres driver: \`npm install better-auth pg\`.
+- \`lib/auth.ts\`: \`import { betterAuth } from "better-auth"; import { Pool } from "pg"; export const auth = betterAuth({ database: new Pool({ connectionString: process.env.DATABASE_URL }), emailAndPassword: { enabled: true }, secret: process.env.BETTER_AUTH_SECRET });\` — read the secret from process.env.BETTER_AUTH_SECRET (it is already in \`.env.local\`); never hardcode or self-generate one, and do NOT set \`baseURL\` (better-auth infers it from request headers, which is what makes the ephemeral preview URL work).
+- \`app/api/auth/[...all]/route.ts\`: \`import { toNextJsHandler } from "better-auth/next-js"; import { auth } from "@/lib/auth"; export const { POST, GET } = toNextJsHandler(auth);\`
+- \`lib/auth-client.ts\`: \`import { createAuthClient } from "better-auth/react"; export const { signIn, signUp, signOut, useSession } = createAuthClient();\` — use these in your login/register UI.
+- Create the auth tables by running \`npx @better-auth/cli migrate --y\` via Bash as part of the build (it reads lib/auth.ts and creates the user/session/account tables in DATABASE_URL). Skipping this makes the first signup fail with a 500.
+- Email/password ONLY: do NOT wire OAuth / social login (no credentials, ephemeral URL). There is no email service here, so leave email verification and password-reset emails disabled.
+- If \`.env.local\` / DATABASE_URL is missing, tell the user that login needs the database rather than falling back to a fake/localStorage auth.`;
 
 export const REVIEW_DB_NOTE = `
 
-Note: a \`.env.local\` containing DATABASE_URL in the working directory is expected platform infrastructure (the app's own Postgres database) — its presence is not a finding, and code using process.env.DATABASE_URL server-side is correct. Never print that file's contents.`;
+Note: a \`.env.local\` containing DATABASE_URL (and, for apps with auth, BETTER_AUTH_SECRET / AUTH_SECRET) in the working directory is expected platform infrastructure (the app's own Postgres database + auth signing secret) — its presence is not a finding, and code using process.env.DATABASE_URL / process.env.BETTER_AUTH_SECRET server-side is correct. Never print that file's contents.`;
 
 /** Appends `note` when the per-app database integration is active. */
 export function dbAware(prompt: string, note: string): string {

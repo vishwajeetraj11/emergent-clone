@@ -143,6 +143,18 @@ export const sessions = pgTable("sessions", {
   // NEON_API_KEY is configured, otherwise never.
   neonBranchId: text("neon_branch_id"),
   databaseUrl: text("database_url"),
+  // Per-session signing secret for the generated app's own auth library
+  // (better-auth reads it as BETTER_AUTH_SECRET — see
+  // src/server/project-db.ts's ensureSessionAuthSecret / buildSandboxEnvContent).
+  // Same lifecycle + secrecy contract as databaseUrl above: written into the
+  // sandbox as `.env.local` (excluded from file snapshots, see
+  // src/server/files.ts), NEVER placed in the files table, GitHub exports, or
+  // agent prompts. Generated once and stable across resumes so login cookies
+  // survive; a fork INHERITS the parent's value (forkSession) so the fork's
+  // copy-on-write auth rows stay valid. Nullable — populated lazily on first
+  // sandbox start when NEON_API_KEY is configured (no DB, no DB-backed auth),
+  // otherwise never.
+  authSecret: text("auth_secret"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
