@@ -195,30 +195,18 @@ export async function runAgentQuery(options: RunAgentQueryOptions): Promise<RunA
 
   let aborted = false;
 
-  // OpenAI's Responses API rejects a system-role entry inside `messages`
-  // (verified live: "System messages are not allowed in the prompt or
-  // messages fields") — it takes the system prompt as the top-level option.
-  // Anthropic, conversely, only supports a cacheControl breakpoint on a
-  // message-level providerOptions, so IT gets the messages-array form.
-  const info = getModelInfo(options.modelId);
-  const promptShape =
-    info?.provider === "anthropic"
-      ? {
-          messages: [
-            {
-              role: "system" as const,
-              content: options.system,
-              providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
-            },
-            { role: "user" as const, content: options.prompt },
-          ],
-        }
-      : { system: options.system, prompt: options.prompt };
-
+  // The system prompt goes in the top-level `system` option for BOTH
+  // providers. A `role: "system"` entry inside `messages` is rejected by the
+  // AI SDK ("System messages are not allowed in the prompt or messages
+  // fields") — the top-level option is the portable form. (Trade-off: we no
+  // longer set an explicit Anthropic cacheControl breakpoint on the system
+  // prefix; Anthropic still caches heuristically, and correctness across both
+  // providers wins over that optimization.)
   try {
     const result = await generateText({
       model: resolveModel(options.modelId, options.apiKeys),
-      ...promptShape,
+      system: options.system,
+      prompt: options.prompt,
       tools: options.tools,
       stopWhen,
       abortSignal: abortController.signal,
