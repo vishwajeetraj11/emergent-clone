@@ -48,7 +48,10 @@ const MODEL_PRICING: Record<string, ModelRate> = {
   // Claude Haiku 4.5 standard pricing: $1.00 / $5.00 per 1,000,000 tokens.
   "claude-haiku-4-5-20251001": { inputPerMillionUsd: 1.0, outputPerMillionUsd: 5.0 },
   // GPT-5.6 tiers — verified against OpenAI's pricing page (July 2026):
-  // sol $5/$0.50-cached/$30, terra $2.50/$0.25/$15, luna $1/$0.10/$6.
+  // terra $2.50/$0.25-cached/$15, luna $1/$0.10/$6.
+  // sol ($5/$0.50/$30) is no longer in MODEL_CATALOG (dropped on cost grounds)
+  // but its pricing is retained so any job that selected it before that change
+  // still bills at its real rate instead of the sonnet fallback.
   "gpt-5.6-sol": { inputPerMillionUsd: 5.0, outputPerMillionUsd: 30.0, cachedInputPerMillionUsd: 0.5 },
   "gpt-5.6-terra": { inputPerMillionUsd: 2.5, outputPerMillionUsd: 15.0, cachedInputPerMillionUsd: 0.25 },
   "gpt-5.6-luna": { inputPerMillionUsd: 1.0, outputPerMillionUsd: 6.0, cachedInputPerMillionUsd: 0.1 },
