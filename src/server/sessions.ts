@@ -2,10 +2,8 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { files as filesTable, jobs, sessions } from "@/db/schema";
 import { appendEvent } from "@/server/events";
-import { getSessionFiles } from "@/server/files";
 import { runAgentLoop } from "@/server/agent";
 import { ensureSessionDatabase } from "@/server/project-db";
-import { getSandboxDir, writeSnapshotFiles } from "@/server/sandbox";
 import { copyObject, sessionFileKey } from "@/server/r2";
 import { setJobApiKeys, type UserApiKeys } from "@/server/user-keys";
 import type { JobRow, SessionRow } from "@/server/jobs";
@@ -134,14 +132,9 @@ export async function forkSession(sessionId: string): Promise<{
     }
   }
 
-  // Hydrated content, written onto the forked session's own sandbox path —
-  // not a copy of the original's on-disk directory, so a since-orphaned or
-  // never-started original doesn't block the fork from getting real files.
-  // Also feeds the file-count/paths summary message below.
-  const originalFiles = await getSessionFiles(sessionId);
-  if (originalFiles.length > 0) {
-    writeSnapshotFiles(getSandboxDir(forked.id), originalFiles);
-  }
+  // No local write: the fork's sandbox hydrates its files from R2 on first
+  // start (the Vercel provider seeds the VM from getSessionFiles, which reads
+  // the index rows + R2 objects just copied above).
 
   // If the original session has its own database (Neon branch), branch the
   // fork's database off it NOW — a Neon branch is a copy-on-write snapshot
@@ -157,12 +150,12 @@ export async function forkSession(sessionId: string): Promise<{
 
   const [job] = await db.insert(jobs).values({ sessionId: forked.id, status: "done" }).returning();
 
-  const shownPaths = originalFiles.slice(0, MAX_FORK_SUMMARY_PATHS).map((f) => f.path);
-  const moreCount = originalFiles.length - shownPaths.length;
+  const shownPaths = rawRows.slice(0, MAX_FORK_SUMMARY_PATHS).map((f) => f.path);
+  const moreCount = rawRows.length - shownPaths.length;
   const filesSummary =
-    originalFiles.length > 0
-      ? ` It starts from the ${originalFiles.length} file${
-          originalFiles.length === 1 ? "" : "s"
+    rawRows.length > 0
+      ? ` It starts from the ${rawRows.length} file${
+          rawRows.length === 1 ? "" : "s"
         } already built there${
           shownPaths.length > 0
             ? ` (${shownPaths.join(", ")}${moreCount > 0 ? `, +${moreCount} more` : ""})`
@@ -174,5 +167,5 @@ export async function forkSession(sessionId: string): Promise<{
     text: `This session is a fork of an earlier one.${filesSummary} The original session's job and files are untouched — keep chatting here to continue building independently from this point.`,
   });
 
-  return { session: forked, job, fileCount: originalFiles.length };
+  return { session: forked, job, fileCount: rawRows.length };
 }

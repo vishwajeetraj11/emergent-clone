@@ -5,7 +5,7 @@ import type { JobRow, ProjectRow, SessionRow } from "@/server/jobs";
 import { dropProjectDatabase } from "@/server/project-db";
 import { deletePrefix, sessionFileKey } from "@/server/r2";
 import { cancelScheduledStop } from "@/server/preview-stop-scheduler";
-import { removeSandboxDir, sandboxProvider } from "@/server/sandbox";
+import { sandboxProvider } from "@/server/sandbox";
 
 // ---------------------------------------------------------------------------
 // Phase 3: read-side helper for the persistence route (GET /api/projects/[id])
@@ -138,8 +138,7 @@ export async function renameProject(
  * externals with no record to retry from. Per session we:
  *   1. cancel any scheduled preview-stop timer (so it can't fire against a
  *      just-deleted session), 2. stop the sandbox, 3. permanently destroy the
- *      Vercel VM (no-op under the local provider), 4. remove the local sandbox
- *      dir, 5. delete the session's R2 objects (no-op when R2 unconfigured).
+ *      Vercel VM (Sandbox.delete), 4. delete the session's R2 objects.
  * Then the project's Neon database is dropped, then the `projects` row is
  * deleted — FK cascades (see src/db/schema.ts) take care of sessions -> jobs
  * -> events/files/deployments rows. creditLedger is user-scoped and survives
@@ -175,12 +174,6 @@ export async function deleteProject(projectId: string): Promise<boolean> {
       await sandboxProvider.destroy?.(s.id);
     } catch (err) {
       console.error(`[projects] failed to destroy sandbox for session ${s.id}`, err);
-    }
-
-    try {
-      removeSandboxDir(s.id);
-    } catch (err) {
-      console.error(`[projects] failed to remove local sandbox dir for session ${s.id}`, err);
     }
 
     try {
