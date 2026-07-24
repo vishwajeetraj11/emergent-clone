@@ -37,7 +37,7 @@ export function getLiveSandbox(sessionId: string): Sandbox | null {
 // whose top-of-file comment explains why that's the default and what it
 // costs: zero isolation, and the generated app's dev server inherits this
 // process's FULL environment (ANTHROPIC_API_KEY, DATABASE_URL, Clerk/GitHub/
-// Stripe/Vercel secrets, ...). This provider is the fix, gated behind
+// Razorpay/Vercel secrets, ...). This provider is the fix, gated behind
 // SANDBOX_PROVIDER=vercel + isVercelSandboxConfigured() (see sandbox.ts's
 // factory export) so the zero-isolation local behavior stays the default.
 //
@@ -362,7 +362,7 @@ export class VercelSandboxProvider implements SandboxProvider {
         resume: true,
         // No `env` — see this module's doc comment on env hygiene. Nothing
         // from this process's own environment (ANTHROPIC_API_KEY,
-        // DATABASE_URL, Clerk/GitHub/Stripe/Vercel secrets) belongs inside
+        // DATABASE_URL, Clerk/GitHub/Razorpay/Vercel secrets) belongs inside
         // the generated app's runtime.
         onCreate: async (sbx) => {
           sandboxRef = sbx;

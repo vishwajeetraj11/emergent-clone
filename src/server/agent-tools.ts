@@ -19,7 +19,7 @@ import type { AnswerItem, Question } from "@/lib/types";
 //     soft boundary (same accepted residual risk as before — single-user
 //     local tool, documented in agent.ts's header).
 //   - bash gets a curated env, not process.env — the platform's own secrets
-//     (ANTHROPIC/OPENAI keys, platform DATABASE_URL, GitHub/Stripe/Neon…)
+//     (ANTHROPIC/OPENAI keys, platform DATABASE_URL, GitHub/Razorpay/Neon…)
 //     are no longer inherited by agent-run shell commands.
 //
 // Tool failures return error strings rather than throwing: the AI SDK relays

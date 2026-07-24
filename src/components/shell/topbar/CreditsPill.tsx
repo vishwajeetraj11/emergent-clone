@@ -7,8 +7,8 @@ import type { JobStatus } from "@/lib/types";
 /**
  * Phase 4 (Half A, REAL): the "Buy Credits" button reflects the signed-in
  * user's actual credit_ledger balance instead of being a purely decorative
- * label. Phase 4 (Half B, gated inert): clicking attempts a real Stripe
- * Checkout session when configured, and surfaces "Stripe is not
+ * label. Phase 4 (Half B, gated inert): clicking attempts a real Razorpay
+ * payment when configured, and surfaces "not
  * configured" otherwise — never a silent no-op. See useCredits for the
  * fetch/checkout logic.
  */

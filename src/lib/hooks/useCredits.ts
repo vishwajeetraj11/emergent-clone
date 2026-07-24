@@ -7,16 +7,45 @@ import type { JobStatus } from "@/lib/types";
 type BuyStatus = "idle" | "loading" | "not_configured" | "error";
 
 /**
- * Phase 4 (Half A, REAL): the "Buy Credits" pill's actual credit_ledger
+ * The "Buy Credits" pill's actual credit_ledger
  * balance (GET /api/credits) instead of being a purely decorative label.
  * Refetched whenever the active job's status changes, since a
  * running/just-finished job is exactly when new `usage` events (and their
  * matching ledger debits) land.
  *
- * Phase 4 (Half B, gated inert): buyCredits() attempts a real Stripe
- * Checkout session (src/server/stripe.ts) when configured, and surfaces
- * "Stripe is not configured" otherwise — never a silent no-op.
+ * BuyCredits() attempts a real Razorpay payment link
+ * (src/server/razorpay.ts) when configured, and surfaces a clear
+ * "not configured" message otherwise — never a silent no-op.
  */
+type RazorpayCtor = new (options: Record<string, unknown>) => { open: () => void };
+
+const RAZORPAY_CHECKOUT_SRC = "https://checkout.razorpay.com/v1/checkout.js";
+
+/**
+ * Loads Razorpay Checkout on first use rather than in the document head — the
+ * overwhelming majority of sessions never open it, and it is a third-party
+ * script on every page otherwise. Resolves immediately once already present.
+ */
+function loadRazorpayCheckout(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if ((window as unknown as { Razorpay?: unknown }).Razorpay) return resolve();
+    const existing = document.querySelector<HTMLScriptElement>(
+      `script[src="${RAZORPAY_CHECKOUT_SRC}"]`
+    );
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("Razorpay Checkout failed to load")), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = RAZORPAY_CHECKOUT_SRC;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Razorpay Checkout failed to load"));
+    document.body.appendChild(script);
+  });
+}
+
 export function useCredits(jobStatus?: JobStatus | null) {
   const [balance, setBalance] = useState<number | null>(null);
   /**
@@ -56,21 +85,42 @@ export function useCredits(jobStatus?: JobStatus | null) {
     try {
       const data = await fetchJson<{
         configured?: boolean;
-        url?: string;
+        orderId?: string;
+        keyId?: string;
+        amount?: number;
+        currency?: string;
         error?: string;
       }>("/api/billing/checkout", { method: "POST" });
+
       if (data.configured === false) {
         setStatus("not_configured");
-        setMessage(data.error ?? "Stripe is not configured in this environment.");
+        setMessage(data.error ?? "Payments are not configured in this environment.");
         return;
       }
-      if (data.error || !data.url) {
+      if (data.error || !data.orderId || !data.keyId) {
         setStatus("error");
         setMessage(data.error ?? "Something went wrong.");
         return;
       }
+
+      await loadRazorpayCheckout();
+
+      // callback_url rather than a handler: Razorpay POSTs the result to our
+      // own route, so the signature is verified server-side and credits are
+      // granted even if this tab goes away mid-payment.
+      const RazorpayCheckout = (window as unknown as { Razorpay?: RazorpayCtor }).Razorpay;
+      if (!RazorpayCheckout) throw new Error("Razorpay Checkout failed to load");
+
       setStatus("idle");
-      window.location.href = data.url;
+      new RazorpayCheckout({
+        key: data.keyId,
+        order_id: data.orderId,
+        amount: data.amount,
+        currency: data.currency,
+        name: "Emergent",
+        description: "Agent usage credits",
+        callback_url: `${window.location.origin}/api/billing/callback`,
+      }).open();
     } catch (err) {
       setStatus("error");
       setMessage(err instanceof Error ? err.message : "Failed to start checkout");

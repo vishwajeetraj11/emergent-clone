@@ -11,7 +11,7 @@ import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
 // no-op that returns immediately — same "gated inert" pattern already used
 // throughout this codebase (isGitHubAppConfigured in
 // src/server/github-app.ts, isVercelConfigured in src/server/vercel.ts,
-// isStripeConfigured). This MUST
+// isRazorpayConfigured). This MUST
 // NOT change any behavior in the unconfigured path.
 //
 // Configured: resolves the real signed-in Clerk user (getCurrentUser) and

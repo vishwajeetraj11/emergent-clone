@@ -261,6 +261,26 @@ export const files = pgTable(
 // ---------------------------------------------------------------------------
 // credit_ledger — per-token usage accounting
 // ---------------------------------------------------------------------------
+// payment_orders — one row per Razorpay order we create
+// ---------------------------------------------------------------------------
+
+// Razorpay's docs are explicit that verification must use the order id held on
+// YOUR server rather than the one the browser posts back, so the order is
+// recorded here at creation time. It also means userId and credits are read
+// from our own row rather than from the payment's `notes`, whose propagation
+// from order to payment entity is not documented.
+export const paymentOrders = pgTable("payment_orders", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  razorpayOrderId: text("razorpay_order_id").notNull().unique(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  credits: integer("credits").notNull(),
+  amountPaise: integer("amount_paise").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
 
 export const creditLedger = pgTable(
   "credit_ledger",
@@ -273,7 +293,7 @@ export const creditLedger = pgTable(
     reason: varchar("reason", { length: 255 }).notNull(),
     jobId: uuid("job_id").references(() => jobs.id, { onDelete: "set null" }),
     // Nullable dedupe key backing atomic, race-proof idempotent grants (see
-    // src/server/credits.ts's ensureSignupBonus / grantStripePurchase) — a
+    // src/server/credits.ts's ensureSignupBonus / grantCreditPurchase) — a
     // unique index over this column lets concurrent callers race an
     // onConflictDoNothing insert instead of a check-then-insert that
     // Postgres read-committed can't make atomic. Regular usage-debit rows
