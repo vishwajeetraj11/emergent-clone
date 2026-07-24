@@ -72,7 +72,7 @@ made missing configuration silently disable auth: a deploy without these vars
 came up as a public, single-identity builder where every visitor shared one
 user's projects, credits, and GitHub installation, and `/` redirected straight
 into the builder so nothing looked wrong. Every other integration here fails
-closed — no Stripe key means no "Buy Credits" — but auth was the one place
+closed — no payment key means no "Buy Credits" — but auth was the one place
 where absence removed a restriction rather than a feature.
 
 Get both from a Clerk dashboard instance. Local dev needs its own (a

@@ -172,8 +172,9 @@ call and no id needs storing.
   the session is still watched cancels the timer.
 
 **Traps**
-- `killDevServer`'s `pkill -f next` matches the `sh` process running it, so it
-  SIGTERMs itself and never kills anything. See `KNOWN-ISSUES.md` issue 2.
+- `killDevServer`'s patterns are bracketed (`[n]ext`) on purpose — a plain
+  `next` matches the `sh` process running the pkill, so it SIGTERMs itself and
+  kills nothing. Don't "simplify" the brackets away.
 - The 180s readiness wait and the 45-minute timeout are both tuned from real
   failures. Don't lower either without reading why.
 
@@ -263,19 +264,22 @@ Shared code lives in `src/lib/utils/`, `src/lib/constants/` (including
 
 **Goal:** understand billing and the ship-it features.
 
-**Read:** `src/server/credits.ts`, `stripe.ts`, `github-app.ts`, `vercel.ts`,
+**Read:** `src/server/credits.ts`, `razorpay.ts`, `github-app.ts`, `vercel.ts`,
 then `KNOWN-ISSUES.md` and `CHANGELOG.md`
 
 Every model call emits a `usage` event and debits the ledger at that specific
 model's published rate — planner and builder differ materially, so cost is
 computed per call, not flat. 1 credit = $0.01, priced at cost. Top-ups go through
-Stripe-hosted Checkout; the webhook is the only thing that ever grants credits.
+Razorpay Checkout against a server-created Order. The callback and the
+webhook both grant, keyed on the payment id, so exactly one lands.
 
 GitHub Save uses a real App installation token. Vercel Deploy posts to
 `/v13/deployments`.
 
 **Traps**
-- Credits are **live**; Stripe top-up is **never live-verified**. Signature
+- Credits and the purchase callback are **live-verified** (a real test-mode
+  payment granted exactly one ledger row). The **webhook** is not — it needs a
+  public URL. Signature
   verification and purchase idempotency have not been exercised.
 - Vercel deploy is likewise code-complete but unverified.
 - An installation token can't create a repo on a *personal* GitHub account — a
