@@ -26,7 +26,7 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## Generated-app auth (per-session database + secrets)
 
-When a generated app needs login, emergent builds **real** database-backed
+When a generated app needs login, Emergent Clone builds **real** database-backed
 email/password auth with [better-auth](https://better-auth.com) — never a
 localStorage/cookie mock. Everything the app's auth needs is provisioned by the
 platform and injected into the sandbox as a `.env.local` file (built by

@@ -86,7 +86,7 @@ export const projects = pgTable("projects", {
   slug: varchar("slug", { length: 255 }).notNull().unique(),
   status: projectStatusEnum("status").notNull().default("active"),
   // Neon project backing this project's per-app Postgres databases (see
-  // src/server/project-db.ts). One Neon project per emergent project; each
+  // src/server/project-db.ts). One Neon project per Emergent Clone project; each
   // session gets its own BRANCH inside it (sessions.neonBranchId below), so
   // a fork's copy-on-write database matches the fork's copy-of-the-files
   // semantics exactly. Nullable — stays null until the first sandbox start

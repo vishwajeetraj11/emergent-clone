@@ -177,7 +177,7 @@ export async function deploySessionToVercel(sessionId: string): Promise<{ url: s
     throw new Error("Nothing to deploy yet — no files have been built for this session");
   }
 
-  const projectName = `emergent-${sessionId.replace(/-/g, "").slice(0, 24)}`;
+  const projectName = `emergent-clone-${sessionId.replace(/-/g, "").slice(0, 24)}`;
 
   // Must happen before the deployment is created — see this helper's doc
   // comment. Skipped entirely for sessions without their own database.

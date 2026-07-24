@@ -118,7 +118,7 @@ export function useCredits(jobStatus?: JobStatus | null) {
         order_id: data.orderId,
         amount: data.amount,
         currency: data.currency,
-        name: "Emergent",
+        name: "Emergent Clone",
         description: "Agent usage credits",
         callback_url: `${window.location.origin}${apiRoutes.billingCallback}`,
       }).open();

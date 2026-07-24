@@ -7,7 +7,7 @@ import { projects, sessions } from "@/db/schema";
 // ---------------------------------------------------------------------------
 // Per-app Postgres, backed by Neon (https://neon.com).
 //
-// Layout: one Neon PROJECT per emergent project (projects.neonProjectId), one
+// Layout: one Neon PROJECT per Emergent Clone project (projects.neonProjectId), one
 // Neon BRANCH per session (sessions.neonBranchId + sessions.databaseUrl).
 // Branches are copy-on-write snapshots of their parent, which makes a session
 // fork's database behave exactly like its files already do: an independent
@@ -156,7 +156,7 @@ export async function ensureSessionDatabase(sessionId: string): Promise<string |
       project: {
         // Neon project names are display-only; slug keeps it recognizable in
         // their console.
-        name: `emergent-${project.slug}`.slice(0, 60),
+        name: `emergent-clone-${project.slug}`.slice(0, 60),
         region_id: process.env.NEON_REGION || DEFAULT_REGION,
         ...(orgId ? { org_id: orgId } : {}),
       },
@@ -251,7 +251,7 @@ export async function ensureSessionAuthSecret(sessionId: string): Promise<string
  *
  * `appUrl` (the session's live preview origin, e.g. https://sb-xxx.vercel.run —
  * known to the caller at sandbox start) is emitted as BETTER_AUTH_URL. better-auth
- * defaults trustedOrigins to [baseURL] and, behind the emergent preview proxy,
+ * defaults trustedOrigins to [baseURL] and, behind the Emergent Clone preview proxy,
  * its header-inferred baseURL does NOT match the external preview origin — so
  * a POST from the preview is rejected with "Invalid origin". Pinning baseURL
  * from this env var (see the generated lib/auth.ts in src/server/agent-prompts.ts)
@@ -281,7 +281,7 @@ export async function buildSandboxEnvContent(
 
 /**
  * Deletes the project's entire Neon project (all session branches with it).
- * Best-effort — called when an emergent project is deleted.
+ * Best-effort — called when an Emergent Clone project is deleted.
  */
 export async function dropProjectDatabase(neonProjectId: string): Promise<void> {
   await neonFetch("DELETE", `/projects/${neonProjectId}`);

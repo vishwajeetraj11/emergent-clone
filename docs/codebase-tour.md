@@ -17,7 +17,7 @@ bugs here, not hypotheticals.
 
 **Read:** `AGENTS.md`, `README.md`, `.env.example`, `docs/setup.md`, `package.json`
 
-emergent is a Lovable/Bolt-style app builder. A user describes an app in chat;
+Emergent Clone is a Lovable/Bolt-style app builder. A user describes an app in chat;
 an LLM agent plans it, writes it, reviews it, and runs it in an isolated VM with
 a live preview. The user can then save it to GitHub or deploy it to Vercel.
 
@@ -213,7 +213,7 @@ GitHub export, and deploy all read the snapshot, never a live sandbox.
 
 **Read:** `src/server/project-db.ts`, then `BUILD_DB_NOTE` in `agent-prompts.ts`
 
-One Neon project per emergent project, one Neon **branch** per session — so a
+One Neon project per Emergent Clone project, one Neon **branch** per session — so a
 fork's database is a copy-on-write snapshot of its parent, matching the fork's
 copied files. The connection string and a per-session auth secret are written
 into the VM as `.env.local`, which `next dev` loads natively.

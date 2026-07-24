@@ -82,7 +82,7 @@ development instance's `pk_test_`/`sk_test_` pair is free).
 
 **Required.** Per-app Postgres for generated apps (`src/server/project-db.ts`).
 
-One Neon project per emergent project (created lazily on first sandbox start),
+One Neon project per Emergent Clone project (created lazily on first sandbox start),
 one Neon **branch** per session — so a fork's database is a copy-on-write
 snapshot of its parent, matching the fork's copied files. The session's
 connection string and auth secret are written into its sandbox as `.env.local`,

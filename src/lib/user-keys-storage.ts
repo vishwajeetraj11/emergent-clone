@@ -23,7 +23,7 @@ export interface UserApiKeys {
   openai?: string;
 }
 
-const STORAGE_KEY = "emergent.byok";
+const STORAGE_KEY = "emergent-clone.byok";
 
 /** False during SSR/prerendering (no `window`), true inside a real browser tab. */
 function hasWindow(): boolean {

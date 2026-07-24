@@ -10,12 +10,12 @@ import type { AnswerItem, Question } from "@/lib/types";
 //
 // Every tool below runs INSIDE the session's Vercel sandbox (the same VM that
 // serves the preview) via the @vercel/sandbox API — runCommand for shell,
-// readFileToBuffer/writeFiles for files — NOT on the emergent server's local
+// readFileToBuffer/writeFiles for files — NOT on the Emergent Clone server's local
 // disk. The agent edits the exact filesystem the dev server runs, so there is
 // no local working dir and no sync step. Two hardenings:
 //   - file tools refuse paths that resolve outside the sandbox app dir
 //     (APP_DIR). Bash remains a soft boundary (the sandbox is the isolation).
-//   - bash inherits only the VM's own environment; the emergent platform's
+//   - bash inherits only the VM's own environment; the Emergent Clone platform's
 //     secrets never cross into the box (they live only in the server process).
 //
 // Tool failures return error strings rather than throwing: the AI SDK relays

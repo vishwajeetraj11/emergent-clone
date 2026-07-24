@@ -1,7 +1,7 @@
 /**
  * Environment-aware user-facing copy. Some strings name this platform's own
  * internal machinery (sandbox, snapshot, VM, …) — useful while developing
- * Emergent itself, but implementation detail a real end user of a deployed
+ * Emergent Clone itself, but implementation detail a real end user of a deployed
  * instance has no business seeing. Rather than inlining a NODE_ENV check at
  * every call site, define the dev/prod pair once here and export the
  * resolved constant.
@@ -18,7 +18,7 @@ function devProdMessage(devMessage: string, prodMessage: string): string {
 /**
  * Shown while attemptRestorePreview (src/lib/hooks/useAgentSession.ts) is
  * bringing a session's sandbox back up from its `files` snapshot. The dev
- * string names the actual mechanism for people developing Emergent itself;
+ * string names the actual mechanism for people developing Emergent Clone itself;
  * the prod string is what an end user of a deployed instance sees instead.
  */
 export const RESTORING_PREVIEW_MESSAGE = devProdMessage(
@@ -30,7 +30,7 @@ export const RESTORING_PREVIEW_MESSAGE = devProdMessage(
  * Shown by PreviewPanel's dead-preview card once useAgentSession's health
  * poll confirms the sandbox is down — whether from hitting its timeout or
  * from the eager /api/sessions/[id]/stop-preview call on navigate-away. The
- * dev strings name the actual mechanism for people developing Emergent
+ * dev strings name the actual mechanism for people developing Emergent Clone
  * itself; the prod strings are what an end user of a deployed instance sees
  * instead.
  */
