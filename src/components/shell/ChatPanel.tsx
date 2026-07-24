@@ -101,7 +101,11 @@ function DeploymentHistory({ sessionId }: { sessionId?: string | null }) {
                 className="flex flex-col items-start gap-0.5"
               >
                 <span className="text-xs font-medium">
-                  {i === 0 ? "Latest" : `${deploymentList.length - i} versions back`}
+                  {/* Newest-first, so the index IS the distance back. Counting
+                      from `length` inverted it: with four deploys the oldest
+                      was labelled "1 versions back" and the second-newest
+                      "3 versions back". */}
+                  {i === 0 ? "Latest" : `${i} version${i === 1 ? "" : "s"} back`}
                 </span>
                 <span className="text-[10px] text-muted-foreground">
                   {new Date(d.createdAt).toLocaleString()}
