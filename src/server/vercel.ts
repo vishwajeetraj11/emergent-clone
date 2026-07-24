@@ -318,6 +318,22 @@ export interface DeploymentSummary {
  * the Deploy button (always creates a new one). See the `deployments` table
  * comment in src/db/schema.ts for why this exists alongside
  * sessions.vercelDeploymentUrl, which only ever holds the latest.
+ *
+ * The newest entry is reported as the session's LIVE url (the project's
+ * production alias) rather than its own per-deployment url. Both address the
+ * same build — Vercel points the alias at whichever production deployment is
+ * newest — but only the alias is the origin the app's auth trusts
+ * (BETTER_AUTH_URL, see ensureProjectEnv), so the per-deployment form fails
+ * every sign-in with "Invalid origin". Handing a user a dead-on-arrival link
+ * for the deployment they are actually running is the one case worth
+ * correcting.
+ *
+ * OLDER entries keep their own url, and signing in on them still fails. That
+ * is inherent: an app can trust one origin, the alias only ever points at the
+ * newest deploy, and a superseded build has no stable hostname of its own.
+ * Those links remain useful for what the dropdown is for — looking at what a
+ * previous version rendered — and the alternative (trusting *.vercel.app
+ * wholesale) trades real security for a flow nobody needs.
  */
 export async function listDeploymentsForSession(
   sessionId: string
@@ -328,5 +344,15 @@ export async function listDeploymentsForSession(
     .from(deployments)
     .where(eq(deployments.sessionId, sessionId))
     .orderBy(desc(deployments.createdAt));
-  return rows.map((r) => ({ id: r.id, url: r.url, createdAt: r.createdAt }));
+
+  const [session] = await db
+    .select({ liveUrl: sessions.vercelDeploymentUrl })
+    .from(sessions)
+    .where(eq(sessions.id, sessionId));
+
+  return rows.map((r, i) => ({
+    id: r.id,
+    url: i === 0 && session?.liveUrl ? session.liveUrl : r.url,
+    createdAt: r.createdAt,
+  }));
 }
