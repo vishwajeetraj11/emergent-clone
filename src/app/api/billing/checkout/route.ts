@@ -1,16 +1,16 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { createCreditCheckoutSession, isRazorpayConfigured } from "@/server/razorpay";
+import { createCreditOrder, isRazorpayConfigured } from "@/server/razorpay";
 
 /**
- * The "Buy Credits" button's endpoint.
- * Unconfigured (default, no STRIPE_SECRET_KEY — always the case in this
- * environment): responds 200 with `configured: false` so the client can
- * surface a clear "not configured" state, same pattern as
- * POST /api/sessions/[id]/save-github. Never live-verified beyond this OFF
- * path — no real Razorpay key here.
+ * The "Buy Credits" button's endpoint. Creates a Razorpay Order and returns
+ * what the browser needs to open Checkout — never a payment URL, since this
+ * flow opens Checkout client-side with a callback_url rather than redirecting.
+ *
+ * Unconfigured: responds 200 with `configured: false` so the client can surface
+ * a clear message, same pattern as POST /api/sessions/[id]/save-github.
  */
-export async function POST(request: Request) {
+export async function POST() {
   if (!isRazorpayConfigured()) {
     return NextResponse.json({
       configured: false,
@@ -21,9 +21,8 @@ export async function POST(request: Request) {
 
   try {
     const userId = (await getCurrentUser()).id;
-    const origin = new URL(request.url).origin;
-    const { url } = await createCreditCheckoutSession(userId, origin);
-    return NextResponse.json({ configured: true, url });
+    const order = await createCreditOrder(userId);
+    return NextResponse.json({ configured: true, ...order });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[api/billing/checkout] failed", err);

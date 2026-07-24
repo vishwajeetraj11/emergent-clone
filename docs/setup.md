@@ -161,29 +161,48 @@ instead (`GitHubPersonalAccountRepoCreationError`). Nothing breaks.
 
 ## Razorpay "Buy Credits" — `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`
 
-`src/server/razorpay.ts`. Unconfigured, the "Buy Credits" button surfaces a
-clear "not configured" message rather than failing silently.
+`src/server/razorpay.ts`. Unconfigured, the button surfaces a clear "not
+configured" message rather than failing silently.
 
-Uses **Payment Links**, not the Checkout.js modal: the link is created
-server-side and the browser is redirected to its `short_url`. No key reaches the
-client and no Razorpay script is loaded, so there is no publishable key to
-configure.
+Razorpay's standard web flow: an Order is created server-side, Checkout opens in
+the browser against that order, and the result is verified server-side. Because
+`callback_url` is passed instead of a client `handler`, Razorpay POSTs the
+result to `/api/billing/callback` rather than handing it to page JavaScript.
 
-Get the key pair from the Razorpay dashboard under Account & Settings → API
-Keys. Test-mode keys (`rzp_test_…`) work end to end against test cards.
+`key_id` reaches the browser, which is expected — it is the publishable half of
+the pair. `key_secret` never leaves the server.
 
-`RAZORPAY_WEBHOOK_SECRET` is required by `POST /api/webhooks/razorpay` — it is
-the only path that ever grants credits, so without it a payment succeeds and the
-user receives nothing. In the dashboard under Settings → Webhooks, add an
-endpoint pointing at `https://<your-domain>/api/webhooks/razorpay`, subscribe to
-**`payment_link.paid`**, and set the same secret there and here.
+### Both paths grant, exactly once
+
+The callback and the webhook both grant credits, and both key their ledger row
+on the Razorpay **payment id**. Whichever arrives first wins; the other no-ops
+against the unique index. The callback gives the user their balance
+immediately, and the webhook guarantees the grant survives a browser that never
+came back.
+
+Neither path trusts the request for the amount or the recipient: both resolve
+those from the `payment_orders` row written when the order was created. Razorpay
+documents that verification must use the order id held on your own server, and
+the propagation of an order's `notes` onto the payment entity is not documented,
+so the row is the single source of truth.
+
+### Setup
+
+Keys come from the dashboard under Account & Settings → API Keys. Test-mode
+keys (`rzp_test_…`) work end to end against test cards.
+
+Under Settings → Webhooks, add an endpoint at
+`https://<your-domain>/api/webhooks/razorpay`, subscribe it to
+**`payment.captured`**, and set the same secret there and in
+`RAZORPAY_WEBHOOK_SECRET`.
+
+The callback URL's domain must be allowlisted in the dashboard, and the route
+must accept POST — it does.
 
 ### Pricing
 
 The pack is priced in INR (`CREDIT_PACK_PRICE_INR_PAISE`, in paise) while
-credits remain USD-denominated internally, because model rates are published in
-USD. The rupee price is therefore a sticker price and the effective margin moves
-with the exchange rate — revisit it if that drifts.
-
-Charging in USD instead would require International Payments to be activated on
-the Razorpay account, which is a separate approval.
+credits stay USD-denominated internally, because model rates are published in
+USD. The rupee figure is a sticker price, so the effective margin moves with the
+exchange rate. Charging in USD would require International Payments to be
+activated on the account, a separate approval.

@@ -14,6 +14,7 @@ export const apiRoutes = {
   models: "/api/models",
   credits: "/api/credits",
   billingCheckout: "/api/billing/checkout",
+  billingCallback: "/api/billing/callback",
 
   githubConnect: "/api/github/connect",
   githubReauthorize: "/api/github/reauthorize",

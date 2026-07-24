@@ -1,16 +1,17 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { getDb } from "@/db";
+import { paymentOrders } from "@/db/schema";
 
 // Razorpay billing — "Buy Credits".
 //
-// Uses Payment Links rather than the Checkout.js modal: a link is created
-// server-side and the browser is redirected to its short_url, so no publishable
-// key reaches the client and no Razorpay script is loaded. The webhook is the
-// only path that ever grants credits.
+// Razorpay's standard web flow: create an Order server-side, open Checkout in
+// the browser with that order_id, and verify the signature Razorpay returns.
+// Passing `callback_url` (rather than a client `handler`) makes Checkout POST
+// the result back to our server, so verification happens server-side.
 //
 // Raw fetch rather than the razorpay SDK, matching the neonFetch / vercel.ts
-// pattern already used for REST integrations here. The two calls this needs
-// (create a link, verify an HMAC) are small enough that a dependency would cost
-// more than it saves.
+// pattern used for the other REST integrations here.
 
 const RAZORPAY_API_BASE = "https://api.razorpay.com/v1";
 
@@ -19,10 +20,9 @@ export const CREDIT_PACK_PRICE_INR_PAISE = 90_000;
 
 /**
  * Credits granted per pack. Deliberately independent of the INR price above:
- * credits are denominated in USD internally (1 credit = $0.01, see
- * src/server/credits.ts) because model rates are published in USD. The rupee
- * price is a sticker price, so the effective margin moves with the exchange
- * rate — revisit CREDIT_PACK_PRICE_INR_PAISE if that drifts too far.
+ * credits are USD-denominated internally (1 credit = $0.01, see credits.ts)
+ * because model rates are published in USD. The rupee price is a sticker
+ * price, so the effective margin moves with the exchange rate.
  */
 export const CREDIT_PACK_CREDITS = 1000;
 
@@ -41,114 +41,145 @@ function authHeader(): string {
   return `Basic ${token}`;
 }
 
+/** Constant-time compare of two hex digests. */
+function signatureMatches(expected: string, received: string): boolean {
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(received, "utf8");
+  // timingSafeEqual throws on a length mismatch, so check that first.
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export interface CheckoutOrder {
+  orderId: string;
+  keyId: string;
+  amount: number;
+  currency: "INR";
+  credits: number;
+}
+
 /**
- * Creates a Payment Link for one credit pack and returns its short_url for the
- * client to redirect to.
+ * Creates a Razorpay Order for one credit pack and records it, returning what
+ * the browser needs to open Checkout.
  *
- * `notes` is Razorpay's metadata field (max 15 pairs, 256 chars each). The
- * webhook reads userId and credits back out of it, so the amount and recipient
- * are never taken from anything the client could set.
- *
- * callback_method must be "get" whenever callback_url is passed — Razorpay
- * rejects the request otherwise. The callback is cosmetic: it returns the user
- * to the app, and grants nothing. Only the webhook grants credits.
+ * The row in `payment_orders` is the point of this: both the callback and the
+ * webhook resolve userId and credits from it rather than from anything the
+ * client sends or from the payment's `notes`.
  */
-export async function createCreditCheckoutSession(
-  userId: string,
-  origin: string
-): Promise<{ url: string }> {
+export async function createCreditOrder(userId: string): Promise<CheckoutOrder> {
   if (!isRazorpayConfigured()) {
     throw new Error("RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not configured");
   }
 
-  const res = await fetch(`${RAZORPAY_API_BASE}/payment_links`, {
+  const res = await fetch(`${RAZORPAY_API_BASE}/orders`, {
     method: "POST",
-    headers: {
-      Authorization: authHeader(),
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: authHeader(), "Content-Type": "application/json" },
     body: JSON.stringify({
       amount: CREDIT_PACK_PRICE_INR_PAISE,
       currency: "INR",
-      description: `${CREDIT_PACK_CREDITS.toLocaleString()} agent usage credits`,
-      notes: {
-        userId,
-        credits: String(CREDIT_PACK_CREDITS),
-      },
-      callback_url: `${origin}/?checkout=success`,
-      callback_method: "get",
-      reminder_enable: false,
+      // Max 40 chars. Random rather than derived from userId so the receipt
+      // can't be guessed from a known user id.
+      receipt: `credits_${crypto.randomUUID().slice(0, 24)}`,
+      notes: { userId, credits: String(CREDIT_PACK_CREDITS) },
     }),
   });
 
   const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.short_url) {
+  if (!res.ok || !data?.id) {
     const detail = data?.error?.description ?? `HTTP ${res.status}`;
-    throw new Error(`Razorpay did not return a payment link: ${detail}`);
+    throw new Error(`Razorpay did not create an order: ${detail}`);
   }
 
-  return { url: data.short_url as string };
-}
+  const db = getDb();
+  await db.insert(paymentOrders).values({
+    razorpayOrderId: data.id as string,
+    userId,
+    credits: CREDIT_PACK_CREDITS,
+    amountPaise: CREDIT_PACK_PRICE_INR_PAISE,
+  });
 
-/**
- * Verifies the X-Razorpay-Signature header against the raw request body.
- *
- * HMAC-SHA256 over the RAW body with the webhook secret as key — the body must
- * not be parsed and re-serialised first, since that changes the bytes the
- * signature was computed over.
- *
- * Compared with timingSafeEqual rather than ===, so the comparison can't leak
- * how many leading bytes matched. Length is checked first because
- * timingSafeEqual throws on a length mismatch.
- */
-export function verifyRazorpayWebhookSignature(rawBody: string, signature: string): boolean {
-  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-  if (!secret) return false;
-
-  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-  const expectedBuf = Buffer.from(expected, "utf8");
-  const receivedBuf = Buffer.from(signature, "utf8");
-  if (expectedBuf.length !== receivedBuf.length) return false;
-  return timingSafeEqual(expectedBuf, receivedBuf);
-}
-
-interface RazorpayWebhookPayload {
-  event?: string;
-  payload?: {
-    payment_link?: {
-      entity?: {
-        status?: string;
-        notes?: Record<string, string> | null;
-      };
-    };
+  return {
+    orderId: data.id as string,
+    keyId: process.env.RAZORPAY_KEY_ID!,
+    amount: CREDIT_PACK_PRICE_INR_PAISE,
+    currency: "INR",
+    credits: CREDIT_PACK_CREDITS,
   };
 }
 
 /**
- * Pulls the credit grant out of a VERIFIED webhook payload, or null when this
- * delivery isn't a completed credit-pack purchase.
+ * Verifies a Checkout callback and resolves what to grant.
  *
- * `eventId` comes from the x-razorpay-event-id header rather than the body:
- * Razorpay documents it as unique per event and intends it for exactly this
- * deduplication, and it is covered by the signature since the caller only
- * reaches here after verification.
+ * The signature is HMAC-SHA256 of `order_id|payment_id` keyed with the API
+ * secret. Because that digest cannot be produced without the secret, a match
+ * proves both ids are authentic — but the amount and recipient are still read
+ * from our own `payment_orders` row, never from the request.
+ *
+ * Returns null when the signature fails or the order is unknown.
  */
-export function extractCreditGrant(
-  body: unknown,
-  eventId: string
-): { userId: string; credits: number; eventId: string } | null {
-  const payload = body as RazorpayWebhookPayload;
-  if (payload?.event !== "payment_link.paid") return null;
+export async function verifyCheckoutCallback(
+  orderId: string,
+  paymentId: string,
+  signature: string
+): Promise<{ userId: string; credits: number; paymentId: string } | null> {
+  const secret = process.env.RAZORPAY_KEY_SECRET;
+  if (!secret || !orderId || !paymentId || !signature) return null;
 
-  const entity = payload.payload?.payment_link?.entity;
-  if (entity?.status !== "paid") return null;
+  const expected = createHmac("sha256", secret).update(`${orderId}|${paymentId}`).digest("hex");
+  if (!signatureMatches(expected, signature)) return null;
 
-  const userId = entity.notes?.userId;
-  const creditsRaw = entity.notes?.credits;
-  if (!userId || !creditsRaw || !eventId) return null;
+  const db = getDb();
+  const [row] = await db
+    .select({ userId: paymentOrders.userId, credits: paymentOrders.credits })
+    .from(paymentOrders)
+    .where(eq(paymentOrders.razorpayOrderId, orderId));
+  if (!row) return null;
 
-  const credits = Number.parseInt(creditsRaw, 10);
-  if (!Number.isFinite(credits) || credits <= 0) return null;
+  return { userId: row.userId, credits: row.credits, paymentId };
+}
 
-  return { userId, credits, eventId };
+/**
+ * Verifies the X-Razorpay-Signature header against the RAW webhook body.
+ *
+ * The body must not be parsed and re-serialised first — that changes the bytes
+ * the signature was computed over.
+ */
+export function verifyWebhookSignature(rawBody: string, signature: string): boolean {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret) return false;
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  return signatureMatches(expected, signature);
+}
+
+interface WebhookBody {
+  event?: string;
+  payload?: { payment?: { entity?: { id?: string; order_id?: string } } };
+}
+
+/**
+ * Resolves a grant from a VERIFIED webhook body, or null when the delivery
+ * isn't a captured credit-pack payment.
+ *
+ * Subscribed event is `payment.captured`. Like the callback path, userId and
+ * credits come from our own row, keyed by the order id in the payload.
+ */
+export async function resolveWebhookGrant(
+  body: unknown
+): Promise<{ userId: string; credits: number; paymentId: string } | null> {
+  const parsed = body as WebhookBody;
+  if (parsed?.event !== "payment.captured") return null;
+
+  const entity = parsed.payload?.payment?.entity;
+  const paymentId = entity?.id;
+  const orderId = entity?.order_id;
+  if (!paymentId || !orderId) return null;
+
+  const db = getDb();
+  const [row] = await db
+    .select({ userId: paymentOrders.userId, credits: paymentOrders.credits })
+    .from(paymentOrders)
+    .where(eq(paymentOrders.razorpayOrderId, orderId));
+  if (!row) return null;
+
+  return { userId: row.userId, credits: row.credits, paymentId };
 }
