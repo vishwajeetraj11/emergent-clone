@@ -53,8 +53,8 @@ export interface CurrentUser {
  * TRADEOFF: email/name no longer re-sync from Clerk on every request. A
  * profile edited in Clerk won't reach this table until that user's row is
  * created (or a `user.updated` webhook is added — src/app/api/webhooks/ has
- * only `stripe` today). Safe as things stand: these columns feed ownership
- * and Stripe receipts, and the UI renders Clerk's own <UserButton>, which
+ * only `razorpay` today). Safe as things stand: these columns feed ownership
+ * and purchase receipts, and the UI renders Clerk's own <UserButton>, which
  * reads from Clerk directly rather than from this row.
  */
 export const getCurrentUser = cache(async (): Promise<CurrentUser> => {

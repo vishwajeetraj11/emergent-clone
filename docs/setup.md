@@ -159,12 +159,31 @@ this only adds a second, independent token type.
 Leave both unset and personal-account users are told to reinstall on an org
 instead (`GitHubPersonalAccountRepoCreationError`). Nothing breaks.
 
-## Stripe "Buy Credits" — `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+## Razorpay "Buy Credits" — `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`
 
-`src/server/stripe.ts`. This redirects to Stripe-hosted Checkout
-(`session.url`) rather than embedding Stripe.js/Elements, so no publishable key
-is needed.
+`src/server/razorpay.ts`. Unconfigured, the "Buy Credits" button surfaces a
+clear "not configured" message rather than failing silently.
 
-`STRIPE_WEBHOOK_SECRET` is required by `POST /api/webhooks/stripe` to verify
-delivery signatures. Without it, purchases can never grant credits even with
-`STRIPE_SECRET_KEY` set.
+Uses **Payment Links**, not the Checkout.js modal: the link is created
+server-side and the browser is redirected to its `short_url`. No key reaches the
+client and no Razorpay script is loaded, so there is no publishable key to
+configure.
+
+Get the key pair from the Razorpay dashboard under Account & Settings → API
+Keys. Test-mode keys (`rzp_test_…`) work end to end against test cards.
+
+`RAZORPAY_WEBHOOK_SECRET` is required by `POST /api/webhooks/razorpay` — it is
+the only path that ever grants credits, so without it a payment succeeds and the
+user receives nothing. In the dashboard under Settings → Webhooks, add an
+endpoint pointing at `https://<your-domain>/api/webhooks/razorpay`, subscribe to
+**`payment_link.paid`**, and set the same secret there and here.
+
+### Pricing
+
+The pack is priced in INR (`CREDIT_PACK_PRICE_INR_PAISE`, in paise) while
+credits remain USD-denominated internally, because model rates are published in
+USD. The rupee price is therefore a sticker price and the effective margin moves
+with the exchange rate — revisit it if that drifts.
+
+Charging in USD instead would require International Payments to be activated on
+the Razorpay account, which is a separate approval.

@@ -189,20 +189,19 @@ export async function ensureSignupBonus(userId: string): Promise<void> {
 }
 
 /**
- * Grants a credit-pack purchase from a verified Stripe webhook event — see
- * src/server/stripe.ts. `stripeEventId` is folded into `idempotencyKey`
+ * Grants a credit-pack purchase from a verified payment webhook — see
+ * src/server/razorpay.ts. `eventId` is folded into `idempotencyKey`
  * (unique-indexed, see src/db/schema.ts) so a retried or duplicate-delivered
- * webhook (Stripe retries on non-2xx, and may also deliver the same event
- * more than once, including near-simultaneously) atomically no-ops via
- * onConflictDoNothing rather than racing a SELECT-then-INSERT check.
+ * webhook atomically no-ops via onConflictDoNothing rather than racing a
+ * SELECT-then-INSERT check.
  */
-export async function grantStripePurchase(
+export async function grantCreditPurchase(
   userId: string,
   credits: number,
-  stripeEventId: string
+  eventId: string
 ): Promise<void> {
   const db = getDb();
-  const reason = `stripe_purchase:${stripeEventId}`;
+  const reason = `credit_purchase:${eventId}`;
 
   await db
     .insert(creditLedger)

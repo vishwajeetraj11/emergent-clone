@@ -273,7 +273,7 @@ export const creditLedger = pgTable(
     reason: varchar("reason", { length: 255 }).notNull(),
     jobId: uuid("job_id").references(() => jobs.id, { onDelete: "set null" }),
     // Nullable dedupe key backing atomic, race-proof idempotent grants (see
-    // src/server/credits.ts's ensureSignupBonus / grantStripePurchase) — a
+    // src/server/credits.ts's ensureSignupBonus / grantCreditPurchase) — a
     // unique index over this column lets concurrent callers race an
     // onConflictDoNothing insert instead of a check-then-insert that
     // Postgres read-committed can't make atomic. Regular usage-debit rows

@@ -14,9 +14,9 @@ type BuyStatus = "idle" | "loading" | "not_configured" | "error";
  * running/just-finished job is exactly when new `usage` events (and their
  * matching ledger debits) land.
  *
- * BuyCredits() attempts a real Stripe
- * Checkout session (src/server/stripe.ts) when configured, and surfaces
- * "Stripe is not configured" otherwise — never a silent no-op.
+ * BuyCredits() attempts a real Razorpay payment link
+ * (src/server/razorpay.ts) when configured, and surfaces a clear
+ * "not configured" message otherwise — never a silent no-op.
  */
 export function useCredits(jobStatus?: JobStatus | null) {
   const [balance, setBalance] = useState<number | null>(null);
@@ -62,7 +62,7 @@ export function useCredits(jobStatus?: JobStatus | null) {
       }>(apiRoutes.billingCheckout, { method: "POST" });
       if (data.configured === false) {
         setStatus("not_configured");
-        setMessage(data.error ?? "Stripe is not configured in this environment.");
+        setMessage(data.error ?? "Payments are not configured in this environment.");
         return;
       }
       if (data.error || !data.url) {

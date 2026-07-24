@@ -1,20 +1,21 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { createCreditCheckoutSession, isStripeConfigured } from "@/server/stripe";
+import { createCreditCheckoutSession, isRazorpayConfigured } from "@/server/razorpay";
 
 /**
  * The "Buy Credits" button's endpoint.
  * Unconfigured (default, no STRIPE_SECRET_KEY — always the case in this
  * environment): responds 200 with `configured: false` so the client can
- * surface a clear "Stripe is not configured" state, same pattern as
+ * surface a clear "not configured" state, same pattern as
  * POST /api/sessions/[id]/save-github. Never live-verified beyond this OFF
- * path — no real Stripe key here.
+ * path — no real Razorpay key here.
  */
 export async function POST(request: Request) {
-  if (!isStripeConfigured()) {
+  if (!isRazorpayConfigured()) {
     return NextResponse.json({
       configured: false,
-      error: "Stripe is not configured in this environment. Set STRIPE_SECRET_KEY to enable purchases.",
+      error:
+        "Payments are not configured in this environment. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to enable purchases.",
     });
   }
 
