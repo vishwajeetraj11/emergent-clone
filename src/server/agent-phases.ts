@@ -21,7 +21,7 @@ import { isStopped, recordUsage } from "@/server/agent-core";
 import { sandboxProvider } from "@/server/sandbox";
 import { getLiveSandbox } from "@/server/sandbox-vercel";
 import { cancelScheduledStop } from "@/server/preview-stop-scheduler";
-import { snapshotSessionFiles } from "@/server/files";
+import { getSessionFilePaths, snapshotSessionFiles } from "@/server/files";
 import { getProjectAgentContext } from "@/server/projects";
 import { getJobApiKeys } from "@/server/user-keys";
 
@@ -332,6 +332,20 @@ export async function runBuildPhase(
   // files record WHAT was built; they cannot record why — a constraint stated
   // once in chat, or an approach considered and rejected. Without that, the
   // agent can cheerfully re-introduce exactly what the user ruled out.
+  // A map of what's already on disk. Every job starts with a fresh model
+  // context, so without this the agent opens by listing the directory and
+  // reading files just to learn what the app is — and each of those tool calls
+  // is a round trip to the VM. Paths come straight from the `files` index, so
+  // this costs one query and no R2 reads.
+  const knownPaths = await getSessionFilePaths(sessionId).catch(() => [] as string[]);
+  const fileMap = knownPaths.length
+    ? `\nFiles already in this app, from the last snapshot:\n${knownPaths
+        .map((p) => `  ${p}`)
+        .join("\n")}\n\nRead only the ones you actually need for this request, and don't list the
+directory to find them. The list is a starting map, not a guarantee: anything
+you create during this turn won't appear in it.\n`
+    : "";
+
   const intent = await getSessionIntent(sessionId);
   const priorIntent =
     intent.originalRequest && intent.originalRequest !== originalPrompt
@@ -343,7 +357,7 @@ export async function runBuildPhase(
   const buildPrompt = `Build the app now in this working directory, based on the plan below and the current request.
 
 ${formatProjectContextBlock(projectContext)}
-
+${fileMap}
 Current request: ${originalPrompt}
 ${priorIntent}
 Plan:

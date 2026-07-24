@@ -225,3 +225,22 @@ export async function getSessionFiles(sessionId: string): Promise<SessionFile[]>
 
   return out.filter((x): x is SessionFile => x !== null);
 }
+
+/**
+ * Just the paths in a session's latest snapshot — no R2 fetch, so this is one
+ * indexed read rather than a hydrate of every file.
+ *
+ * Used to hand the build agent a map of the app up front. Without it the agent
+ * starts each job by listing the directory and reading files to work out what
+ * exists, because every job begins with a fresh model context. Each of those
+ * tool calls is a round trip to the VM, so the rediscovery is the single
+ * largest chunk of wall-clock time in a typical continuation.
+ */
+export async function getSessionFilePaths(sessionId: string): Promise<string[]> {
+  const db = getDb();
+  const rows = await db
+    .select({ path: files.path })
+    .from(files)
+    .where(eq(files.sessionId, sessionId));
+  return rows.map((r) => r.path).sort();
+}
