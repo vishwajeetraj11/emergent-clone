@@ -4,30 +4,17 @@ import { useState } from "react";
 import { Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { JobStatus, ProjectSummary } from "@/lib/types";
+import {
+  jobStatusToDotStatus,
+  statusDotClass,
+  type DotStatus,
+} from "@/lib/utils/job-status";
 
 type ProjectTab = {
   id: string;
   name: string;
-  status: "running" | "idle" | "error";
+  status: DotStatus;
 };
-
-function jobStatusToDotStatus(status: JobStatus | null | undefined): ProjectTab["status"] {
-  if (status === "running" || status === "waiting_on_user" || status === "waiting_on_plan")
-    return "running";
-  if (status === "failed") return "error";
-  return "idle";
-}
-
-function statusDotClass(status: ProjectTab["status"]) {
-  switch (status) {
-    case "running":
-      return "bg-emerald-500";
-    case "error":
-      return "bg-red-500";
-    default:
-      return "bg-muted-foreground";
-  }
-}
 
 /**
  * The open-project tab strip. Only ever drives a single active

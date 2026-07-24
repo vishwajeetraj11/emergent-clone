@@ -31,6 +31,8 @@ import { Timeline } from "@/components/shell/Timeline";
 import { ApiKeysPopover } from "@/components/shell/ApiKeysPopover";
 import { useSpeechRecognition } from "@/lib/hooks/useSpeechRecognition";
 import { cn } from "@/lib/utils";
+import { userHasKeyFor } from "@/lib/utils/api-keys";
+import { TERMINAL_STATUSES } from "@/lib/constants/job";
 import type { AnswerItem, JobStatus, TimelineEvent } from "@/lib/types";
 import type { DeployState, SaveState } from "@/lib/hooks/useAgentSession";
 import { loadUserApiKeys, type UserApiKeys } from "@/lib/user-keys-storage";
@@ -242,21 +244,12 @@ function StatusStrip({ jobStatus }: { jobStatus: JobStatus | null }) {
   );
 }
 
-const TERMINAL_STATUSES = new Set<JobStatus>(["done", "stopped", "failed"]);
-
 interface ModelOption {
   id: string;
   label: string;
   provider: string;
   /** True when the platform itself configured this provider's env key (see src/app/api/models/route.ts). A model with this false is still shown when the user has a BYOK key for its provider — see userHasKeyFor below. */
   platformConfigured: boolean;
-}
-
-/** provider is a loose `string` on ModelOption (client code, see src/lib/user-keys-storage.ts's doc comment on why this file doesn't import the server's ModelProvider type) — this is the BYOK-aware half of "is this model usable", mirroring src/server/llm.ts's providerAvailable. */
-function userHasKeyFor(keys: UserApiKeys, provider: string): boolean {
-  if (provider === "anthropic") return Boolean(keys.anthropic);
-  if (provider === "openai") return Boolean(keys.openai);
-  return false;
 }
 
 /**

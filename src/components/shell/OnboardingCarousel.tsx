@@ -1,65 +1,13 @@
 "use client";
 
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Pause, Play, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-type Slide = {
-  title: string;
-  subtitle: string;
-};
-
-const SLIDES: Slide[] = [
-  {
-    title: "Deploy Your Application",
-    subtitle:
-      "Ship straight to production with a single click once your app is ready.",
-  },
-  {
-    title: "1M Context Window",
-    subtitle:
-      "Your agent keeps the entire build in view — every file, every decision.",
-  },
-  {
-    title: "Manage Agent Context With Forks",
-    subtitle:
-      "Branch a session to explore an idea without losing your working version.",
-  },
-  {
-    title: "Assets",
-    subtitle:
-      "Drop in images, documents, and references for the agent to build with.",
-  },
-];
-
-const AUTO_ADVANCE_MS = 4500;
-
-const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
-
-function subscribeToReducedMotion(onChange: () => void): () => void {
-  const query = window.matchMedia(REDUCED_MOTION_QUERY);
-  query.addEventListener("change", onChange);
-  return () => query.removeEventListener("change", onChange);
-}
-
-/**
- * Reads the user's reduced-motion preference, live. Auto-advancing content is
- * exactly what that setting is for, and it can be toggled at OS level while
- * the page is open — hence a subscription rather than a one-shot read.
- *
- * useSyncExternalStore, not useState + useEffect: matchMedia IS an external
- * store, and reading it in an effect would mean an extra render pass on every
- * mount (plus a setState-in-effect, which React now flags). The server
- * snapshot is `false` because there is no media query to evaluate during SSR;
- * the client's first paint has the real value.
- */
-function usePrefersReducedMotion(): boolean {
-  return useSyncExternalStore(
-    subscribeToReducedMotion,
-    () => window.matchMedia(REDUCED_MOTION_QUERY).matches,
-    () => false
-  );
-}
+import { usePrefersReducedMotion } from "@/lib/hooks/usePrefersReducedMotion";
+import {
+  ONBOARDING_SLIDES,
+  ONBOARDING_AUTO_ADVANCE_MS,
+} from "@/lib/constants/onboarding";
 
 export function OnboardingCarousel() {
   const [index, setIndex] = useState(0);
@@ -83,16 +31,16 @@ export function OnboardingCarousel() {
   useEffect(() => {
     if (!isRunning) return;
     const timer = setInterval(() => {
-      setIndex((prev) => (prev + 1) % SLIDES.length);
-    }, AUTO_ADVANCE_MS);
+      setIndex((prev) => (prev + 1) % ONBOARDING_SLIDES.length);
+    }, ONBOARDING_AUTO_ADVANCE_MS);
     return () => clearInterval(timer);
   }, [isRunning]);
 
   function goTo(next: number) {
-    setIndex((next + SLIDES.length) % SLIDES.length);
+    setIndex((next + ONBOARDING_SLIDES.length) % ONBOARDING_SLIDES.length);
   }
 
-  const slide = SLIDES[index];
+  const slide = ONBOARDING_SLIDES[index];
 
   return (
     <section
@@ -126,7 +74,7 @@ export function OnboardingCarousel() {
           aria-live={isRunning ? "polite" : "off"}
           aria-atomic="true"
           aria-roledescription="slide"
-          aria-label={`Slide ${index + 1} of ${SLIDES.length}`}
+          aria-label={`Slide ${index + 1} of ${ONBOARDING_SLIDES.length}`}
           className="flex w-72 flex-col items-center gap-2 text-center"
         >
           <h2 className="text-base font-semibold text-foreground">
@@ -148,7 +96,7 @@ export function OnboardingCarousel() {
       </div>
 
       <div className="flex items-center gap-1.5">
-        {SLIDES.map((s, i) => (
+        {ONBOARDING_SLIDES.map((s, i) => (
           <button
             key={s.title}
             type="button"

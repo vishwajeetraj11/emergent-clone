@@ -5,32 +5,7 @@ import { PlanCard } from "@/components/shell/PlanCard";
 import { FilesChangedCard } from "@/components/shell/FilesChangedCard";
 import { Markdown } from "@/components/shell/Markdown";
 import type { AnswerItem, Question, TimelineEvent } from "@/lib/types";
-
-function findAnswerFor(
-  events: TimelineEvent[],
-  toolUseId: string
-): AnswerItem[] | null {
-  const answerEvent = events.find(
-    (e) =>
-      e.type === "answer" &&
-      (e.payload as { toolUseId?: string }).toolUseId === toolUseId
-  );
-  if (!answerEvent) return null;
-  return (answerEvent.payload as { answers?: AnswerItem[] }).answers ?? [];
-}
-
-function findPlanDecisionFor(
-  events: TimelineEvent[],
-  planEventId: string
-): { action: "approve" | "revise"; feedback?: string } | null {
-  const decisionEvent = events.find(
-    (e) =>
-      e.type === "plan_decision" &&
-      (e.payload as { planEventId?: string }).planEventId === planEventId
-  );
-  if (!decisionEvent) return null;
-  return decisionEvent.payload as { action: "approve" | "revise"; feedback?: string };
-}
+import { findAnswerFor, findPlanDecisionFor } from "@/lib/utils/events";
 
 export function Timeline({
   events,

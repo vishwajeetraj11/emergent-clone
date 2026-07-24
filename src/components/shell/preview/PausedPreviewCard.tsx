@@ -3,7 +3,7 @@ import {
   PAUSED_PREVIEW_BODY,
   PAUSED_PREVIEW_BUTTON,
   PAUSED_PREVIEW_TITLE,
-} from "@/lib/messages";
+} from "@/lib/constants/messages";
 
 /**
  * Shown in place of the iframe once useAgentSession's background health

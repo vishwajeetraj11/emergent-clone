@@ -9,7 +9,7 @@ import { ProjectsList } from "@/components/shell/ProjectsList";
 import { PausedPreviewCard } from "@/components/shell/preview/PausedPreviewCard";
 import { PreviewFrame } from "@/components/shell/preview/PreviewFrame";
 import { ViewportToggle, type Viewport } from "@/components/shell/preview/ViewportToggle";
-import { RESTORING_PREVIEW_MESSAGE } from "@/lib/messages";
+import { RESTORING_PREVIEW_MESSAGE } from "@/lib/constants/messages";
 
 export function PreviewPanel({
   previewUrl,
