@@ -241,15 +241,31 @@ export async function deploySessionToVercel(sessionId: string): Promise<{ url: s
   }
 
   const data = (await res.json()) as VercelDeploymentResponse;
-  const url = `https://${data.url}`;
+
+  // Two different URLs, deliberately:
+  //
+  //   deploymentUrl — data.url, unique to THIS build and immutable. Kept as
+  //     the `deployments` history row, which exists precisely to point at a
+  //     specific past build.
+  //   liveUrl — the project's production alias, which Vercel repoints at
+  //     whichever production deployment is newest.
+  //
+  // The live link has to be the alias, not data.url. A generated app with
+  // auth trusts exactly one origin — BETTER_AUTH_URL, pinned to this same
+  // alias in ensureProjectEnv above, and unavoidably so, since env vars are
+  // baked in before the deployment (and therefore data.url) exists. Handing
+  // the user data.url instead sent them to an origin their own app does not
+  // trust, and every sign-up there failed with "Invalid origin".
+  const deploymentUrl = `https://${data.url}`;
+  const liveUrl = `https://${projectName}.vercel.app`;
 
   await disableDeploymentProtection(projectName);
 
   const db = getDb();
-  await db.update(sessions).set({ vercelDeploymentUrl: url }).where(eq(sessions.id, sessionId));
-  await db.insert(deployments).values({ sessionId, url });
+  await db.update(sessions).set({ vercelDeploymentUrl: liveUrl }).where(eq(sessions.id, sessionId));
+  await db.insert(deployments).values({ sessionId, url: deploymentUrl });
 
-  return { url };
+  return { url: liveUrl };
 }
 
 export interface DeploymentSummary {
