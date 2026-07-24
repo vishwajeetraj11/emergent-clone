@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Sandbox } from "@vercel/sandbox";
-import { appendEvent } from "@/server/events";
+import { appendEvent, getSessionIntent } from "@/server/events";
 import { setJobStatus } from "@/server/jobs";
 import { runAgentQuery } from "@/server/llm";
 import { buildFileTools, buildReportReviewTool, type ReviewResult } from "@/server/agent-tools";
@@ -133,7 +133,7 @@ async function runReviewPhase(
 
 The app exists to satisfy the request below — review it against that intent, not just generic code quality. A mismatch with the request is itself a reportable finding; a choice the plan makes deliberately is not.
 
-Original request: ${originalPrompt}
+Current request: ${originalPrompt}
 ${planText ? `\nApproved plan:\n${planText}` : ""}`,
     tools: { bash, read, glob, grep, report_review: buildReportReviewTool(resultRef) },
     maxSteps: REVIEW_MAX_ITERATIONS,
@@ -196,7 +196,7 @@ async function runDebugPhase(
     system: dbAware(DEBUG_SYSTEM_PROMPT, BUILD_DB_NOTE),
     prompt: `The app in this working directory was built for this request — keep every fix consistent with it:
 
-Original request: ${originalPrompt}
+Current request: ${originalPrompt}
 
 Fix the following issues found in code review:
 
@@ -327,14 +327,27 @@ export async function runBuildPhase(
 
   const projectContext = await getProjectAgentContext(sessionId);
 
-  const buildPrompt = `Build the app now in this working directory, based on the plan below and the original request.
+  // A continuation job starts with a fresh model context, so the only things
+  // that survive from earlier turns are the files on disk and this block. The
+  // files record WHAT was built; they cannot record why — a constraint stated
+  // once in chat, or an approach considered and rejected. Without that, the
+  // agent can cheerfully re-introduce exactly what the user ruled out.
+  const intent = await getSessionIntent(sessionId);
+  const priorIntent =
+    intent.originalRequest && intent.originalRequest !== originalPrompt
+      ? `\nThis session's original request (earlier turn, for context — the current request above takes precedence):\n${intent.originalRequest}\n${
+          intent.latestPlan ? `\nMost recently approved plan:\n${intent.latestPlan}\n` : ""
+        }`
+      : "";
+
+  const buildPrompt = `Build the app now in this working directory, based on the plan below and the current request.
 
 ${formatProjectContextBlock(projectContext)}
 
-Original request: ${originalPrompt}
-
+Current request: ${originalPrompt}
+${priorIntent}
 Plan:
-${planText || "(no additional plan text was captured — use the original request directly)"}`;
+${planText || "(no additional plan text was captured — use the current request directly)"}`;
 
   try {
     await runBuildQuery(jobId, sandbox, buildPrompt, builderModel);
