@@ -14,9 +14,39 @@ Local Postgres, or Neon via the Vercel Marketplace. The app boots and renders
 with this unset — the client is lazy-init (`src/db/index.ts`) and only required
 once a persistence-backed route is hit.
 
-Schema changes go through `npm run db:push` (see `drizzle.config.ts`). Note that
-push applies DDL directly, with no migration file and no backfill — fine
-pre-launch, unsafe once there is data worth keeping.
+Locally, schema changes go through `npm run db:push` (see `drizzle.config.ts`).
+Push applies DDL directly, with no migration file and no backfill — fine
+against a throwaway dev database, unsafe once there is data worth keeping.
+
+### Deploying: the schema is not applied for you
+
+`npm run build` is `next build` and nothing else. Nothing migrates at boot
+either — `src/db/index.ts` is lazy-init precisely so the app can build and
+start with no database reachable. A fresh deploy therefore comes up against an
+**empty** database and every persistence-backed route fails with
+`relation "..." does not exist`.
+
+Apply the schema explicitly, once per environment and again after any schema
+change:
+
+```bash
+DATABASE_URL="<the deployed database's url>" npm run db:migrate
+```
+
+Use `db:migrate` rather than `db:push` here: it replays the ordered files in
+`drizzle/` and records what it applied, so it is repeatable and reviewable.
+`push` diffs live DDL with no history.
+
+Because `db:push` writes no migration file, a table created only by push exists
+locally and nowhere else — `payment_orders` was in exactly that state until
+`0012_payment_orders.sql`. After changing `src/db/schema.ts`, run
+`npm run db:generate` and commit the file, or the change will never reach a
+deployed environment. `db:generate` printing "No schema changes, nothing to
+migrate" is the check that they agree.
+
+To automate it, run the same command as a pre-deploy step. `drizzle-kit` is a
+devDependency, so it must either survive dependency pruning or be fetched with
+`npx` at that point.
 
 ## Vercel Sandbox — `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`
 

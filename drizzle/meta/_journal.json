@@ -85,6 +85,13 @@
       "when": 1784780600781,
       "tag": "0011_tan_paibok",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1784905817061,
+      "tag": "0012_payment_orders",
+      "breakpoints": true
     }
   ]
 }
