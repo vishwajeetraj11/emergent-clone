@@ -5,6 +5,7 @@ import { Trash2 } from "lucide-react";
 import { fetchJson } from "@/lib/api";
 import { formatDate } from "@/lib/utils/format";
 import { PROJECT_LIST_SKELETON_ROWS } from "@/lib/constants/ui";
+import { apiRoutes } from "@/lib/constants/api-routes";
 
 interface ProjectListItem {
   id: string;
@@ -43,7 +44,7 @@ export function ProjectsList({
 
   useEffect(() => {
     let cancelled = false;
-    fetchJson<{ projects?: ProjectListItem[] }>("/api/projects")
+    fetchJson<{ projects?: ProjectListItem[] }>(apiRoutes.projects)
       .then((data) => {
         if (!cancelled) setProjects(data.projects ?? []);
       })
@@ -63,7 +64,7 @@ export function ProjectsList({
     setDeletingId(id);
     setDeleteError(null);
     try {
-      await fetchJson(`/api/projects/${id}`, { method: "DELETE" });
+      await fetchJson(apiRoutes.project(id), { method: "DELETE" });
       setProjects((prev) => prev?.filter((p) => p.id !== id) ?? prev);
       setConfirmingId(null);
       if (currentProjectId === id) onNavigateHome?.();

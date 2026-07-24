@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { fetchJson } from "@/lib/api";
 import type { JobStatus } from "@/lib/types";
+import { apiRoutes } from "@/lib/constants/api-routes";
 
 type BuyStatus = "idle" | "loading" | "not_configured" | "error";
 
@@ -33,7 +34,7 @@ export function useCredits(jobStatus?: JobStatus | null) {
 
   useEffect(() => {
     let cancelled = false;
-    fetchJson<{ balance?: number }>("/api/credits")
+    fetchJson<{ balance?: number }>(apiRoutes.credits)
       .then((data) => {
         if (!cancelled && typeof data.balance === "number") {
           setBalance(data.balance);
@@ -58,7 +59,7 @@ export function useCredits(jobStatus?: JobStatus | null) {
         configured?: boolean;
         url?: string;
         error?: string;
-      }>("/api/billing/checkout", { method: "POST" });
+      }>(apiRoutes.billingCheckout, { method: "POST" });
       if (data.configured === false) {
         setStatus("not_configured");
         setMessage(data.error ?? "Stripe is not configured in this environment.");

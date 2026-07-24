@@ -36,6 +36,7 @@ import { TERMINAL_STATUSES } from "@/lib/constants/job";
 import type { AnswerItem, JobStatus, TimelineEvent } from "@/lib/types";
 import type { DeployState, SaveState } from "@/lib/hooks/useAgentSession";
 import { loadUserApiKeys, type UserApiKeys } from "@/lib/user-keys-storage";
+import { apiRoutes } from "@/lib/constants/api-routes";
 
 interface DeploymentSummary {
   id: string;
@@ -59,7 +60,7 @@ function DeploymentHistory({ sessionId }: { sessionId?: string | null }) {
   useEffect(() => {
     if (!open || !sessionId) return;
     let cancelled = false;
-    fetch(`/api/sessions/${sessionId}/deployments`)
+    fetch(apiRoutes.sessionDeployments(sessionId))
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { deployments?: DeploymentSummary[] } | null) => {
         if (!cancelled && data?.deployments) setDeploymentList(data.deployments);
@@ -393,7 +394,7 @@ export function ChatPanel({
   const [manualModel, setManualModel] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/models")
+    fetch(apiRoutes.models)
       .then((res) => (res.ok ? res.json() : { models: [], defaultId: null }))
       .then((data: { models?: ModelOption[]; defaultId?: string | null }) => {
         if (cancelled) return;
@@ -568,7 +569,7 @@ export function ChatPanel({
                 : "Connect your GitHub account to save this project."}
             </span>
             <a
-              href={saveState === "needs_reauth" ? "/api/github/reauthorize" : "/api/github/connect"}
+              href={saveState === "needs_reauth" ? apiRoutes.githubReauthorize : apiRoutes.githubConnect}
               className="shrink-0 rounded-md bg-foreground px-2 py-1 text-xs font-medium text-background transition-colors hover:bg-foreground/80"
             >
               Connect GitHub

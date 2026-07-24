@@ -9,6 +9,8 @@ import { getSessionFiles } from "@/server/files";
 // Written against Vercel's documented REST API (POST /v13/deployments) but
 // NOT live-verified — no real token has ever run through this path.
 
+const VERCEL_API_BASE = "https://api.vercel.com";
+
 export function isVercelConfigured(): boolean {
   return Boolean(process.env.VERCEL_TOKEN);
 }
@@ -20,7 +22,7 @@ interface VercelDeploymentResponse {
 }
 
 function vercelApiUrl(path: string): string {
-  const base = `https://api.vercel.com${path}`;
+  const base = `${VERCEL_API_BASE}${path}`;
   // Optional: a token scoped to a Vercel team must say which team it's
   // acting on behalf of. Personal-account tokens don't need this.
   const teamId = process.env.VERCEL_TEAM_ID;

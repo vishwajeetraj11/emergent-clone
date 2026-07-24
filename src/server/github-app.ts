@@ -92,6 +92,11 @@ export async function getGitHubInstallUrl(): Promise<string> {
   return app.getInstallationUrl();
 }
 
+// GitHub's OAuth endpoints live on github.com, NOT api.github.com — the REST
+// calls elsewhere in this file use a different host.
+const GITHUB_OAUTH_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
+const GITHUB_OAUTH_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
+
 /**
  * The URL to send an ALREADY-installed user to in order to (re-)grant the
  * user-to-server OAuth token — GitHub's standalone `/login/oauth/authorize`
@@ -110,7 +115,7 @@ export function getGitHubOAuthAuthorizeUrl(): string {
   const params = new URLSearchParams({
     client_id: process.env.GITHUB_APP_CLIENT_ID!,
   });
-  return `https://github.com/login/oauth/authorize?${params.toString()}`;
+  return `${GITHUB_OAUTH_AUTHORIZE_URL}?${params.toString()}`;
 }
 
 /**
@@ -148,7 +153,7 @@ interface GitHubOAuthTokens {
 export async function exchangeGitHubOAuthCode(
   code: string
 ): Promise<GitHubOAuthTokens> {
-  const res = await fetch("https://github.com/login/oauth/access_token", {
+  const res = await fetch(GITHUB_OAUTH_ACCESS_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({
@@ -176,7 +181,7 @@ export async function exchangeGitHubOAuthCode(
 async function refreshGitHubUserAccessToken(
   refreshToken: string
 ): Promise<GitHubOAuthTokens> {
-  const res = await fetch("https://github.com/login/oauth/access_token", {
+  const res = await fetch(GITHUB_OAUTH_ACCESS_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({

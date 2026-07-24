@@ -49,6 +49,9 @@ export function sessionFileKey(sessionId: string, relPath: string): string {
 // is actually used, and only when configured.
 let cached: S3Client | null = null;
 
+/** R2's S3-compatible endpoint is per-account, not a fixed host. */
+const r2Endpoint = (accountId: string) => `https://${accountId}.r2.cloudflarestorage.com`;
+
 function getClient(): S3Client {
   if (cached) return cached;
   if (!isR2Configured()) {
@@ -56,7 +59,7 @@ function getClient(): S3Client {
   }
   cached = new S3Client({
     region: "auto",
-    endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    endpoint: r2Endpoint(process.env.R2_ACCOUNT_ID!),
     // R2 addresses buckets in the path; path-style keeps the request shape
     // deterministic regardless of bucket name.
     forcePathStyle: true,

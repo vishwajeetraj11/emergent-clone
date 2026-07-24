@@ -9,6 +9,7 @@ import type {
   TimelineEventType,
 } from "@/lib/types";
 import { loadUserApiKeys } from "@/lib/user-keys-storage";
+import { apiRoutes } from "@/lib/constants/api-routes";
 
 export type SaveState =
   | "idle"
@@ -76,7 +77,7 @@ const TERMINAL_JOB_STATUSES = new Set<JobStatus>(["done", "stopped", "failed"]);
 /** Fire-and-forget sandbox teardown on navigate-away — sendBeacon survives page
  * unload where plain fetch may be dropped; keepalive fetch is the fallback. */
 function sendStopPreview(sessionId: string): void {
-  const url = `/api/sessions/${sessionId}/stop-preview`;
+  const url = apiRoutes.sessionStopPreview(sessionId);
   let queued = false;
   try {
     queued = navigator.sendBeacon(url);
@@ -223,7 +224,7 @@ export function useAgentSession() {
   const subscribe = useCallback(
     (jobId: string, after = -1) => {
       closeStream();
-      const es = new EventSource(`/api/jobs/${jobId}/stream?after=${after}`);
+      const es = new EventSource(apiRoutes.jobStream(jobId, after));
       eventSourceRef.current = es;
 
       for (const type of EVENT_TYPES) {
@@ -308,7 +309,7 @@ export function useAgentSession() {
 
     const checkHealth = async () => {
       try {
-        const res = await fetch(`/api/sessions/${sessionId}/preview-health`);
+        const res = await fetch(apiRoutes.sessionPreviewHealth(sessionId));
         if (!res.ok) return;
         const data = (await res.json()) as { alive: boolean };
         if (!cancelled && data.alive === false) {
@@ -388,7 +389,7 @@ export function useAgentSession() {
   const attemptRestorePreview = useCallback(async (sessionId: string) => {
     setState((prev) => ({ ...prev, isRestoringPreview: true, restoreError: null }));
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/restore`, { method: "POST" });
+      const res = await fetch(apiRoutes.sessionRestore(sessionId), { method: "POST" });
       if (res.status === 404) {
         setState((prev) => ({ ...prev, isRestoringPreview: false }));
         return;
@@ -442,7 +443,7 @@ export function useAgentSession() {
 
       setState((prev) => ({ ...prev, isStarting: true, error: null }));
       try {
-        const res = await fetch("/api/projects", {
+        const res = await fetch(apiRoutes.projects, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt, ...(model ? { model } : {}), ...byokBodyField() }),
@@ -503,7 +504,7 @@ export function useAgentSession() {
 
       setState(() => ({ ...INITIAL_STATE, isLoadingProject: true }));
       try {
-        const res = await fetch(`/api/projects/${projectId}`);
+        const res = await fetch(apiRoutes.project(projectId));
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.error ?? `Request failed (${res.status})`);
@@ -517,7 +518,7 @@ export function useAgentSession() {
         let history: TimelineEvent[] = [];
         if (data.session) {
           try {
-            const historyRes = await fetch(`/api/sessions/${data.session.id}/events`);
+            const historyRes = await fetch(apiRoutes.sessionEvents(data.session.id));
             if (historyRes.ok) {
               const historyData = (await historyRes.json()) as { events: TimelineEvent[] };
               history = historyData.events;
@@ -578,7 +579,7 @@ export function useAgentSession() {
         error: null,
       }));
       try {
-        const historyRes = await fetch(`/api/sessions/${sessionId}/events`);
+        const historyRes = await fetch(apiRoutes.sessionEvents(sessionId));
         if (!historyRes.ok) {
           const body = await historyRes.json().catch(() => ({}));
           throw new Error(body.error ?? `Request failed (${historyRes.status})`);
@@ -605,7 +606,7 @@ export function useAgentSession() {
       const jobId = state.jobId;
       if (!jobId) return;
       try {
-        const res = await fetch(`/api/jobs/${jobId}/messages`, {
+        const res = await fetch(apiRoutes.jobMessages(jobId), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ toolUseId, answers }),
@@ -636,7 +637,7 @@ export function useAgentSession() {
       const jobId = state.jobId;
       if (!jobId) return;
       try {
-        const res = await fetch(`/api/jobs/${jobId}/plan`, {
+        const res = await fetch(apiRoutes.jobPlan(jobId), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ planEventId, action, feedback }),
@@ -660,7 +661,7 @@ export function useAgentSession() {
     const jobId = state.jobId;
     if (!jobId) return;
     try {
-      await fetch(`/api/jobs/${jobId}/stop`, { method: "POST" });
+      await fetch(apiRoutes.jobStop(jobId), { method: "POST" });
     } catch (err) {
       console.error("Failed to stop job", err);
     }
@@ -682,7 +683,7 @@ export function useAgentSession() {
       if (!sessionId) return;
       setState((prev) => ({ ...prev, isSendingMessage: true, error: null }));
       try {
-        const res = await fetch(`/api/sessions/${sessionId}/messages`, {
+        const res = await fetch(apiRoutes.sessionMessages(sessionId), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt, planMode, ...(model ? { model } : {}), ...byokBodyField() }),
@@ -726,7 +727,7 @@ export function useAgentSession() {
 
     setState((prev) => ({ ...prev, isForking: true, error: null }));
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/fork`, { method: "POST" });
+      const res = await fetch(apiRoutes.sessionFork(sessionId), { method: "POST" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `Request failed (${res.status})`);
@@ -773,7 +774,7 @@ export function useAgentSession() {
     if (!sessionId) return;
     setState((prev) => ({ ...prev, saveState: "saving", saveMessage: null }));
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/save-github`, { method: "POST" });
+      const res = await fetch(apiRoutes.sessionSaveGithub(sessionId), { method: "POST" });
       const data = (await res.json().catch(() => ({}))) as {
         configured?: boolean;
         connected?: boolean;
@@ -836,7 +837,7 @@ export function useAgentSession() {
     async (name: string) => {
       const projectId = state.project?.id;
       if (!projectId) return;
-      const res = await fetch(`/api/projects/${projectId}`, {
+      const res = await fetch(apiRoutes.project(projectId), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
@@ -862,7 +863,7 @@ export function useAgentSession() {
     if (!sessionId) return;
     setState((prev) => ({ ...prev, deployState: "deploying", deployMessage: null }));
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/deploy-vercel`, { method: "POST" });
+      const res = await fetch(apiRoutes.sessionDeployVercel(sessionId), { method: "POST" });
       const data = (await res.json().catch(() => ({}))) as {
         configured?: boolean;
         url?: string;

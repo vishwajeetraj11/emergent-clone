@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight, FileText } from "lucide-react";
 import { fetchJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { apiRoutes } from "@/lib/constants/api-routes";
 
 interface SessionFile {
   path: string;
@@ -38,7 +39,7 @@ export function FilesChangedCard({
     setLoading(true);
     setError(null);
     try {
-      const all = await fetchJson<SessionFile[]>(`/api/sessions/${sessionId}/files`);
+      const all = await fetchJson<SessionFile[]>(apiRoutes.sessionFiles(sessionId));
       const byPath = new Map(all.map((f) => [f.path, f]));
       const shown = paths
         .map((p) => byPath.get(p))
