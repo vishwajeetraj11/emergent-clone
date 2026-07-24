@@ -112,21 +112,13 @@ async function ensureProjectEnv(
   projectName: string,
   databaseUrl: string,
   authSecret: string | null
-): Promise<void> {
+): Promise<string | null> {
   const headers = {
     Authorization: `Bearer ${process.env.VERCEL_TOKEN}`,
     "Content-Type": "application/json",
   };
 
-  // Mirrors buildSandboxEnvContent: the secret goes under BOTH names because
-  // better-auth reads BETTER_AUTH_SECRET while some generated code reaches for
-  // the more generic AUTH_SECRET.
-  const vars: Record<string, string> = { DATABASE_URL: databaseUrl };
-  if (authSecret) {
-    vars.BETTER_AUTH_SECRET = authSecret;
-    vars.AUTH_SECRET = authSecret;
-  }
-  vars.BETTER_AUTH_URL = `https://${projectName}.vercel.app`;
+  let productionUrl: string | null = null;
 
   try {
     const createRes = await fetch(vercelApiUrl("/v11/projects"), {
@@ -146,9 +138,48 @@ async function ensureProjectEnv(
             message || `status ${createRes.status}`
           }`
         );
-        return; // no project -> no point attempting the env upsert
+        return null; // no project -> no point attempting the env upsert
       }
     }
+
+    // Ask for the project's auto-assigned *.vercel.app domain rather than
+    // building it from projectName. Vercel TRUNCATES that subdomain when the
+    // project name is long: project
+    // `emergent-clone-94b8740a300740d1ae6f46bb` is served at
+    // `emergent-clone-94b8740a300740d1ae6f.vercel.app`, and the untruncated
+    // form 404s. Constructing it was wrong, and pinned BETTER_AUTH_URL to an
+    // origin that does not exist. The domain is created with the project, so
+    // this is answerable before any deployment exists.
+    const domRes = await fetch(vercelApiUrl(`/v9/projects/${projectName}/domains`), { headers });
+    if (domRes.ok) {
+      const body = (await domRes.json().catch(() => ({}))) as {
+        domains?: { name: string; verified?: boolean; redirect?: string | null }[];
+      };
+      // The auto-assigned domain is the verified, non-redirecting .vercel.app
+      // one. Prefer the shortest: a team-scoped alias for the same project is
+      // also listed, and the bare one is what a user is handed.
+      const candidates = (body.domains ?? [])
+        .filter((d) => d.name.endsWith(".vercel.app") && d.verified !== false && !d.redirect)
+        .map((d) => d.name)
+        .sort((a, b) => a.length - b.length);
+      if (candidates[0]) productionUrl = `https://${candidates[0]}`;
+    }
+    if (!productionUrl) {
+      console.error(
+        `[vercel] could not resolve a production domain for ${projectName}; ` +
+          `BETTER_AUTH_URL will be unset and the deployed app's auth will reject its own origin`
+      );
+    }
+
+    // Mirrors buildSandboxEnvContent: the secret goes under BOTH names because
+    // better-auth reads BETTER_AUTH_SECRET while some generated code reaches
+    // for the more generic AUTH_SECRET.
+    const vars: Record<string, string> = { DATABASE_URL: databaseUrl };
+    if (authSecret) {
+      vars.BETTER_AUTH_SECRET = authSecret;
+      vars.AUTH_SECRET = authSecret;
+    }
+    if (productionUrl) vars.BETTER_AUTH_URL = productionUrl;
 
     const envBase = vercelApiUrl(`/v10/projects/${projectName}/env`);
     const envUrl = `${envBase}${envBase.includes("?") ? "&" : "?"}upsert=true`;
@@ -178,6 +209,8 @@ async function ensureProjectEnv(
   } catch (err) {
     console.error(`[vercel] failed to wire env vars for ${projectName}`, err);
   }
+
+  return productionUrl;
 }
 
 /**
@@ -211,8 +244,9 @@ export async function deploySessionToVercel(sessionId: string): Promise<{ url: s
   // Must happen before the deployment is created — see this helper's doc
   // comment. Skipped entirely for sessions without their own database: no
   // database means no DB-backed auth either, so there is nothing to wire.
+  let productionUrl: string | null = null;
   if (session.databaseUrl) {
-    await ensureProjectEnv(projectName, session.databaseUrl, session.authSecret);
+    productionUrl = await ensureProjectEnv(projectName, session.databaseUrl, session.authSecret);
   }
 
   const res = await fetch(vercelApiUrl("/v13/deployments"), {
@@ -251,13 +285,17 @@ export async function deploySessionToVercel(sessionId: string): Promise<{ url: s
   //     whichever production deployment is newest.
   //
   // The live link has to be the alias, not data.url. A generated app with
-  // auth trusts exactly one origin — BETTER_AUTH_URL, pinned to this same
+  // auth trusts exactly one origin — BETTER_AUTH_URL, pinned to that same
   // alias in ensureProjectEnv above, and unavoidably so, since env vars are
   // baked in before the deployment (and therefore data.url) exists. Handing
   // the user data.url instead sent them to an origin their own app does not
   // trust, and every sign-up there failed with "Invalid origin".
+  //
+  // Falls back to data.url when the alias couldn't be resolved (or the session
+  // has no database, so no env was wired and auth isn't in play anyway) — a
+  // working link beats no link.
   const deploymentUrl = `https://${data.url}`;
-  const liveUrl = `https://${projectName}.vercel.app`;
+  const liveUrl = productionUrl ?? deploymentUrl;
 
   await disableDeploymentProtection(projectName);
 
