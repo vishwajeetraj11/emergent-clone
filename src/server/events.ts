@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { events, jobs } from "@/db/schema";
 import { isUniqueViolation } from "@/server/db-utils";
@@ -105,4 +105,45 @@ export async function getSessionEvents(
     .innerJoin(jobs, eq(events.jobId, jobs.id))
     .where(eq(jobs.sessionId, sessionId))
     .orderBy(asc(events.createdAt));
+}
+
+/**
+ * The session's founding request and its most recently approved plan, for
+ * giving a continuation job the intent behind an app it can only otherwise
+ * infer by reading the code.
+ *
+ * Both come from `events`, so nothing new is stored. Deliberately just these
+ * two rather than a transcript: the files already carry what was built, and
+ * what they cannot carry is why — a constraint stated once in chat, or an
+ * approach that was considered and rejected.
+ *
+ * Returns nulls for a session's first job, where there is no prior intent yet.
+ */
+export async function getSessionIntent(
+  sessionId: string
+): Promise<{ originalRequest: string | null; latestPlan: string | null }> {
+  const db = getDb();
+
+  const [first] = await db
+    .select({ payload: events.payload })
+    .from(events)
+    .innerJoin(jobs, eq(events.jobId, jobs.id))
+    .where(and(eq(jobs.sessionId, sessionId), eq(events.type, "user_message")))
+    .orderBy(asc(events.createdAt))
+    .limit(1);
+
+  const [plan] = await db
+    .select({ payload: events.payload })
+    .from(events)
+    .innerJoin(jobs, eq(events.jobId, jobs.id))
+    .where(and(eq(jobs.sessionId, sessionId), eq(events.type, "plan")))
+    .orderBy(desc(events.createdAt))
+    .limit(1);
+
+  const text = (p: unknown) => {
+    const v = (p as { text?: unknown } | null)?.text;
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  };
+
+  return { originalRequest: text(first?.payload), latestPlan: text(plan?.payload) };
 }
