@@ -1,27 +1,24 @@
 import { cache } from "react";
 import { eq } from "drizzle-orm";
-import { DEV_USER } from "@/lib/dev-user";
 
-// ---------------------------------------------------------------------------
-// Phase 3 (Half B, gated inert): Clerk auth replaces DEV_USER only when
-// fully configured. No CLERK_SECRET_KEY / NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-// were available when this was built — verified that npm run build, npm run
-// lint, and `next dev` all behave identically to before this change with
-// neither var set (see PLAN.md Phase 3). The Clerk ("on") path below is
-// code-complete against Clerk's current documented APIs but NOT
-// live-verified — no real keys exist in this environment.
-//
-// isClerkConfigured() is the single gate everything else in this file (and
-// src/proxy.ts, src/app/layout.tsx's ClerkGate, the sign-in/up routes) keys
-// off of. `@clerk/nextjs/server` is only ever imported dynamically, and only
-// from inside a branch already guarded by this check — so when unconfigured,
-// none of Clerk's module code runs, not even at import time.
-// ---------------------------------------------------------------------------
+// Clerk is REQUIRED in every environment, and deliberately has no
+// isXConfigured() "off" path like the other integrations: for those, absent
+// credentials remove a feature, but for auth they would remove a restriction —
+// and absence is the default state of every misconfiguration.
 
-export function isClerkConfigured(): boolean {
-  return Boolean(
-    process.env.CLERK_SECRET_KEY && process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-  );
+/**
+ * Throws unless both Clerk keys are present. Called from src/proxy.ts per
+ * request, so a misconfigured environment gets this message rather than Clerk's
+ * own "Missing publishableKey" from somewhere deeper in a render.
+ */
+export function assertClerkConfigured(): void {
+  if (!process.env.CLERK_SECRET_KEY || !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+    throw new Error(
+      "Clerk is not configured: set CLERK_SECRET_KEY and " +
+        "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY. Auth is required in every " +
+        "environment — there is no unauthenticated mode."
+    );
+  }
 }
 
 export interface CurrentUser {
@@ -31,13 +28,11 @@ export interface CurrentUser {
 }
 
 /**
- * Resolves the acting user for server-side ownership (users/projects rows).
- * Unconfigured (the default, always-tested path): returns the fixed
- * DEV_USER row unchanged from Phase 0-2 — single-user dev mode. Configured:
- * reads the authenticated Clerk identity and maps it to this app's own
- * `users` row keyed by clerkUserId, so ownership of new projects follows the
- * real signed-in user instead of DEV_USER. This branch is unverified (no
- * Clerk keys in this environment).
+ * Resolves the acting user for server-side ownership (users/projects rows):
+ * reads the authenticated Clerk identity and maps it to this app's own `users`
+ * row keyed by clerkUserId. Throws when there is no signed-in user — callers
+ * that can tolerate that (a signed-out visitor hitting a list endpoint) catch
+ * it; page routes redirect to /sign-in before ever getting here.
  *
  * HOT/COLD SPLIT — this runs on every authenticated request (34 API call
  * sites reach it via src/lib/authz.ts's assert*Ownership, which needs "who am
@@ -63,10 +58,6 @@ export interface CurrentUser {
  * reads from Clerk directly rather than from this row.
  */
 export const getCurrentUser = cache(async (): Promise<CurrentUser> => {
-  if (!isClerkConfigured()) {
-    return DEV_USER;
-  }
-
   // auth() resolves the session token in-process — no Clerk API round trip.
   const { auth } = await import("@clerk/nextjs/server");
   const { userId } = await auth();

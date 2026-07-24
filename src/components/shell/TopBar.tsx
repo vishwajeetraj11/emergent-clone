@@ -3,23 +3,10 @@
 import { UserButton } from "@clerk/nextjs";
 import { Bell, Home, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { CreditsPill } from "@/components/shell/topbar/CreditsPill";
 import { ProjectTabs } from "@/components/shell/topbar/ProjectTabs";
-import { DEV_USER } from "@/lib/dev-user";
 import type { JobStatus, ProjectSummary } from "@/lib/types";
-
-// Client-safe Clerk check — mirrors src/lib/auth.ts's isClerkConfigured(),
-// but that helper reads CLERK_SECRET_KEY, which is never available in
-// client bundles by design (Next.js only inlines NEXT_PUBLIC_* vars
-// client-side). This checks only the publishable key, which is genuinely
-// safe to expose. Assumes both keys are always set together, same as every
-// other isXConfigured() check in this codebase — a publishable key set
-// without a matching secret key (an unsupported partial config) would try
-// to render <UserButton> without the <ClerkProvider> that ClerkGate only
-// mounts when BOTH keys are present, and crash.
-const CLERK_CONFIGURED_CLIENT = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
 
 export function TopBar({
   project,
@@ -30,10 +17,10 @@ export function TopBar({
 }: {
   project?: ProjectSummary | null;
   jobStatus?: JobStatus | null;
-  /** Phase 3: real navigation for the Home button — back to `/` (the
+  /** Real navigation for the Home button — back to `/` (the
    * "what will you build" composer), not just a visual reset. */
   onNavigateHome?: () => void;
-  /** Phase 3: real navigation for a project tab — to /p/[projectId]. */
+  /** Real navigation for a project tab — to /p/[projectId]. */
   onSelectProject?: (projectId: string) => void;
   /** PATCH /api/projects/[id] — see useAgentSession's renameProject. */
   onRenameProject?: (name: string) => Promise<void>;
@@ -114,22 +101,9 @@ export function TopBar({
             0 to ~28px shoves every sibling to its left sideways, which is
             the visible topbar jolt on every page load. Reserving the box up
             front means the avatar fades into space already allocated for it.
-            size-7 matches Clerk's default avatar; the DEV_USER fallback is
-            size-6 and centers inside the same slot, so both branches occupy
-            identical space. */}
+            size-7 matches Clerk's default avatar. */}
         <div className="flex size-7 shrink-0 items-center justify-center">
-          {CLERK_CONFIGURED_CLIENT ? (
-            <UserButton />
-          ) : (
-            <Avatar size="sm">
-              <AvatarFallback>
-                {DEV_USER.name
-                  .split(" ")
-                  .map((part) => part[0])
-                  .join("")}
-              </AvatarFallback>
-            </Avatar>
-          )}
+          <UserButton />
         </div>
       </div>
     </header>

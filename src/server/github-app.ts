@@ -10,7 +10,7 @@ import { getSessionFiles } from "@/server/files";
 // personal-access-token approach (formerly src/server/github.ts, deleted).
 //
 // Same "off by default, gated inert" pattern as every other isXConfigured()
-// in this codebase (isClerkConfigured in src/lib/auth.ts, isVercelConfigured
+// in this codebase (isVercelConfigured
 // in src/server/vercel.ts, isRazorpayConfigured in src/server/razorpay.ts):
 // isGitHubAppConfigured() gates everything else in this file. Unlike the
 // Clerk/Vercel/Razorpay integrations, this one IS live-configured and

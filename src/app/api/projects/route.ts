@@ -1,25 +1,19 @@
 import { NextResponse } from "next/server";
-import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
-import { DEV_USER } from "@/lib/dev-user";
+import { getCurrentUser } from "@/lib/auth";
 import { createProjectAndJob } from "@/server/jobs";
 import { listProjectsForUser } from "@/server/projects";
 import { parseUserApiKeys } from "@/server/user-keys";
 
 /**
- * The dashboard's project list. Unconfigured (default): DEV_USER's projects.
- * Configured but signed out: an empty list, not a 500 — there's no "current
- * user" to resolve, and a fresh visitor has nothing to see yet either way.
+ * The dashboard's project list. Signed out: an empty list, not a 500 — there's
+ * no "current user" to resolve, and a fresh visitor has nothing to see anyway.
  */
 export async function GET() {
   let userId: string;
-  if (isClerkConfigured()) {
-    try {
-      userId = (await getCurrentUser()).id;
-    } catch {
-      return NextResponse.json({ projects: [] });
-    }
-  } else {
-    userId = DEV_USER.id;
+  try {
+    userId = (await getCurrentUser()).id;
+  } catch {
+    return NextResponse.json({ projects: [] });
   }
 
   const rows = await listProjectsForUser(userId);

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { ClerkGate } from "@/components/auth/ClerkGate";
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -43,9 +43,15 @@ export default function RootLayout({
         >
           Skip to main content
         </a>
-        <ClerkGate>
+        {/* `/` is the marketing page, so without these a fresh sign-in lands
+            back on the pitch instead of the product. These props take
+            precedence over NEXT_PUBLIC_CLERK_SIGN_{IN,UP}_FALLBACK_REDIRECT_URL. */}
+        <ClerkProvider
+          signInFallbackRedirectUrl="/dashboard"
+          signUpFallbackRedirectUrl="/dashboard"
+        >
           <TooltipProvider>{children}</TooltipProvider>
-        </ClerkGate>
+        </ClerkProvider>
       </body>
     </html>
   );

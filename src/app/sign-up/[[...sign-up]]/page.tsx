@@ -1,19 +1,7 @@
-import { isClerkConfigured } from "@/lib/auth";
+import { SignUp } from "@clerk/nextjs";
 
-/**
- * Phase 3 (Half B, gated inert): catch-all sign-up route, mirrors
- * src/app/sign-in/[[...sign-in]]/page.tsx — see that file's comment.
- */
-export default async function SignUpPage() {
-  if (!isClerkConfigured()) {
-    return (
-      <div className="flex min-h-screen items-center justify-center p-8 text-center text-sm text-muted-foreground">
-        Sign-up is not configured in this environment.
-      </div>
-    );
-  }
-
-  const { SignUp } = await import("@clerk/nextjs");
+/** Catch-all sign-up route, mirrors src/app/sign-in/[[...sign-in]]/page.tsx. */
+export default function SignUpPage() {
   return (
     <div className="flex min-h-screen items-center justify-center p-8">
       <SignUp />

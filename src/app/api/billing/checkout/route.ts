@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCurrentUser, isClerkConfigured } from "@/lib/auth";
-import { DEV_USER } from "@/lib/dev-user";
+import { getCurrentUser } from "@/lib/auth";
 import { createCreditOrder, isRazorpayConfigured } from "@/server/razorpay";
 
 /**
@@ -21,7 +20,7 @@ export async function POST() {
   }
 
   try {
-    const userId = isClerkConfigured() ? (await getCurrentUser()).id : DEV_USER.id;
+    const userId = (await getCurrentUser()).id;
     const order = await createCreditOrder(userId);
     return NextResponse.json({ configured: true, ...order });
   } catch (err) {
