@@ -392,16 +392,65 @@ export class VercelSandboxProvider implements SandboxProvider {
       }
     }
 
+    // Resumed sandboxes also get package.json reconciled against the snapshot.
+    // onCreate is the ONLY place files are written, and getOrCreate skips it
+    // for a resume — so a VM whose disk drifted from the snapshot keeps the
+    // stale copy forever. Observed live: a VM holding the agent's source files
+    // but the TEMPLATE's package.json, so every import of a dependency the
+    // agent had installed failed to resolve, every route 500'd, and restore
+    // timed out at 180s waiting for a server that was running fine and serving
+    // nothing but errors.
+    //
+    // Only package.json is reconciled, not the whole tree: it is the one file
+    // whose staleness silently breaks the build rather than just showing old
+    // content, and re-writing everything here would clobber work the agent did
+    // in the VM that hasn't been snapshotted yet.
+    let depsChanged = false;
+    if (!created) {
+      try {
+        const desired = fileList.find((f) => f.path === "package.json")?.content;
+        if (desired) {
+          const current = await sandbox
+            .runCommand({ cmd: "cat", args: ["package.json"] })
+            .then((r) => r.output("stdout"))
+            .catch(() => "");
+          if (current.trim() !== desired.trim()) {
+            await sandbox.writeFiles([
+              { path: "package.json", content: Buffer.from(desired, "utf8") },
+            ]);
+            options?.onStatus?.("Installing dependencies…");
+            const install = await sandbox.runCommand({ cmd: "npm", args: ["install"] });
+            if (install.exitCode !== 0) {
+              const tail = await install.output("both").catch(() => "");
+              throw new Error(
+                `npm install exited with code ${install.exitCode}.${
+                  tail.trim() ? `\n${tail.trim().slice(-1500)}` : ""
+                }`
+              );
+            }
+            depsChanged = true;
+          }
+        }
+      } catch (err) {
+        // Best-effort, same contract as the .env.local refresh: a reconcile
+        // failure must not block a boot that might otherwise have worked.
+        console.error(
+          `[sandbox-vercel] reconciling dependencies for session ${sessionId} failed`,
+          err
+        );
+      }
+    }
+
     const url = sandbox.domain(APP_PORT);
     // Already serving (e.g. another server process booted it) — a second dev
-    // server would just crash on the port. Skipped when the credential just
-    // changed: that server has the stale env baked in, so restart it instead.
-    if (!created && !envChanged && (await probeUrl(url, 2000))) {
+    // server would just crash on the port. Skipped when the env or the deps
+    // just changed: that server has the stale copy baked in, so restart it.
+    if (!created && !envChanged && !depsChanged && (await probeUrl(url, 2000))) {
       registry.set(sessionId, { sandbox, url, state: "running" });
       return { url };
     }
 
-    // A stale-env or half-dead server may still hold the port.
+    // A stale-env, stale-deps, or half-dead server may still hold the port.
     if (!created) {
       await this.killDevServer(sandbox);
     }
