@@ -718,6 +718,25 @@ export function ChatPanel({
                 </TooltipTrigger>
                 <TooltipContent>Stop agent</TooltipContent>
               </Tooltip>
+            ) : isStarting ? (
+              /* Creating the project/session/job round-trips a remote Postgres
+                 several times (~1.5s warm, ~10s on the first connection of a
+                 cold process). `isActive` is derived from jobStatus, which
+                 does not exist until that response lands, so the composer used
+                 to sit on a live-looking Send button for the whole window and
+                 read as "my click did nothing" — the agent had in fact already
+                 started. Not the real Stop button: there is no job id to stop
+                 yet. */
+              <Tooltip>
+                <TooltipTrigger
+                  aria-label="Starting"
+                  disabled
+                  className="flex size-7 items-center justify-center rounded-md bg-foreground text-background disabled:opacity-40"
+                >
+                  <ThinkingDots />
+                </TooltipTrigger>
+                <TooltipContent>Starting…</TooltipContent>
+              </Tooltip>
             ) : (
               <Tooltip>
                 <TooltipTrigger

@@ -30,15 +30,31 @@ const MAX_SLUG_ATTEMPTS = 5;
 export async function createProjectAndJob(prompt: string, model?: string, apiKeys?: UserApiKeys) {
   const db = getDb();
 
-  const owner = await getCurrentUser();
-  // Idempotent — only actually grants credits the first time this
-  // user is seen (see src/server/credits.ts's ensureSignupBonus).
-  await ensureSignupBonus(owner.id);
-
+  // Validate before touching the database: an empty prompt used to cost a
+  // Clerk round trip and two queries before failing.
   const trimmed = prompt.trim();
   if (!trimmed) {
     throw new Error("Prompt must not be empty");
   }
+
+  const owner = await getCurrentUser();
+
+  // Idempotent — only actually grants credits the first time this user is seen
+  // (see src/server/credits.ts's ensureSignupBonus). Started here but awaited
+  // below rather than now: it gates nothing in the insert chain, so it can
+  // overlap those round trips instead of adding one of its own. Every await in
+  // this function is a separate hop to a remote Postgres, and this whole path
+  // is what the user stares at before the composer shows any sign of life.
+  //
+  // It IS awaited before runAgentLoop fires, though — the loop reads the
+  // balance, and a first-time user whose bonus was still in flight could see
+  // zero credits.
+  const signupBonus = ensureSignupBonus(owner.id);
+  // Mark it handled right away. If an insert below throws, this function exits
+  // without ever reaching the await, and an unhandled rejection is fatal in
+  // Node. The no-op catch only defuses that; `await signupBonus` still
+  // rethrows the real error on the normal path.
+  signupBonus.catch(() => {});
 
   let project: ProjectRow | undefined;
   for (let attempt = 0; attempt < MAX_SLUG_ATTEMPTS; attempt++) {
@@ -85,6 +101,9 @@ export async function createProjectAndJob(prompt: string, model?: string, apiKey
   // BEFORE runAgentLoop fires below, since the loop reads this store back
   // while resolving models for this job.
   if (apiKeys) setJobApiKeys(job.id, apiKeys);
+
+  // Settle the overlapped signup bonus before the loop reads the balance.
+  await signupBonus;
 
   // Fire-and-forget: intentionally not awaited. See the durability note above.
   runAgentLoop(job.id).catch((err) => {
