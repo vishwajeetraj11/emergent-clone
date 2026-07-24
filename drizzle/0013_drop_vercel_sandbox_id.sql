@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" DROP COLUMN "vercel_sandbox_id";

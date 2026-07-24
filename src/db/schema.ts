@@ -121,17 +121,6 @@ export const sessions = pgTable("sessions", {
   // Your Application"), nullable — stays null until a real VERCEL_TOKEN is
   // configured and a deploy actually succeeds. Mirrors githubRepoUrl above.
   vercelDeploymentUrl: text("vercel_deployment_url"),
-  // Preview-sandbox identity for VercelSandboxProvider (src/server/sandbox-vercel.ts),
-  // nullable — stays null until this session first starts a sandbox.
-  // @vercel/sandbox's sandboxes are ephemeral (die on timeout) and only ever
-  // tracked in that provider's in-process registry, which dies on every
-  // dev-server restart. Without durable storage for the id, a
-  // restart would strand a still-running, still-billing sandbox (Vercel has
-  // no way to know it's abandoned until its timeout elapses) AND create a
-  // brand new one on the next restore, silently multiplying live sandboxes
-  // against the Hobby plan's 10-concurrent cap. This column lets restore
-  // look the id up via Sandbox.get() and reattach instead.
-  vercelSandboxId: text("vercel_sandbox_id"),
   // Per-session Neon branch id + its Postgres connection string (see
   // src/server/project-db.ts and projects.neonProjectId above). The
   // connection string is written into the sandbox as `.env.local` (excluded
