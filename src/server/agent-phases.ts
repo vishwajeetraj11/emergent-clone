@@ -312,13 +312,13 @@ export async function runBuildPhase(
   });
 
   // The live VM handle the agent's tools + snapshot run against. start()
-  // returned "running", so it should be present; a null here means the
-  // provider isn't the Vercel sandbox (the AI-SDK build runtime requires it).
+  // returned "running", so it should be present — the registry entry is only
+  // missing if the sandbox died between start() and here.
   const sandbox = getLiveSandbox(sessionId);
   if (!sandbox) {
     await appendEvent(jobId, "system", "error", {
       message:
-        "No live sandbox after start — the build runtime requires SANDBOX_PROVIDER=vercel.",
+        "No live sandbox after start — the VM is unreachable. Check VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID.",
     });
     await setJobStatus(jobId, "failed");
     await sandboxProvider.stop(sessionId).catch(() => {});

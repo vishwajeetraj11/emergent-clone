@@ -122,11 +122,10 @@ export const sessions = pgTable("sessions", {
   // configured and a deploy actually succeeds. Mirrors githubRepoUrl above.
   vercelDeploymentUrl: text("vercel_deployment_url"),
   // Preview-sandbox identity for VercelSandboxProvider (src/server/sandbox-vercel.ts),
-  // nullable — stays null under the default LocalProcessSandboxProvider.
-  // @vercel/sandbox v1's sandboxes are ephemeral (die on timeout) and only
-  // ever tracked in that provider's in-process registry, which — same
-  // accepted tradeoff as the local provider's registry, see sandbox.ts — dies
-  // on every dev-server restart. Without durable storage for the id, a
+  // nullable — stays null until this session first starts a sandbox.
+  // @vercel/sandbox's sandboxes are ephemeral (die on timeout) and only ever
+  // tracked in that provider's in-process registry, which dies on every
+  // dev-server restart. Without durable storage for the id, a
   // restart would strand a still-running, still-billing sandbox (Vercel has
   // no way to know it's abandoned until its timeout elapses) AND create a
   // brand new one on the next restore, silently multiplying live sandboxes
