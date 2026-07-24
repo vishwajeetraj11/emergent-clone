@@ -21,6 +21,11 @@ export type SaveState =
   | "needs_reauth";
 export type DeployState = "idle" | "deploying" | "done" | "error" | "not_configured";
 
+/** How long a successful Save/Deploy banner stays up before clearing itself.
+ * Long enough to read a URL and click it, short enough that it doesn't become
+ * furniture. Failures are never auto-cleared — see the effect that uses this. */
+const RESULT_BANNER_TIMEOUT_MS = 12_000;
+
 interface AgentSessionState {
   project: ProjectSummary | null;
   sessionId: string | null;
@@ -899,6 +904,35 @@ export function useAgentSession() {
       }));
     }
   }, [state.sessionId]);
+
+  /**
+   * Clears the Save/Deploy result banners a while after they succeed. Without
+   * this they sit above the composer for the rest of the session, stacking up
+   * and pushing the input down.
+   *
+   * SUCCESS ONLY. An error or a "not configured" message stays until the user
+   * does something about it — auto-hiding the one state that asks them to act
+   * is how a failed save looks like it worked. The URL is kept in `saveUrl` /
+   * `deployUrl` regardless, and the Deployments dropdown is the durable way
+   * back to a link, so nothing is actually lost when the banner goes.
+   */
+  useEffect(() => {
+    const clearsSave = state.saveState === "done";
+    const clearsDeploy = state.deployState === "done";
+    if (!clearsSave && !clearsDeploy) return;
+
+    const timer = setTimeout(() => {
+      setState((prev) => ({
+        ...prev,
+        // Re-check inside the timeout: a new save/deploy may have started in
+        // the meantime, and this stale timer must not wipe its "saving…" state.
+        saveState: prev.saveState === "done" ? "idle" : prev.saveState,
+        deployState: prev.deployState === "done" ? "idle" : prev.deployState,
+      }));
+    }, RESULT_BANNER_TIMEOUT_MS);
+
+    return () => clearTimeout(timer);
+  }, [state.saveState, state.deployState]);
 
   return {
     ...state,
