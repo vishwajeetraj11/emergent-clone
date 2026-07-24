@@ -1,4 +1,3 @@
-import { isNeonConfigured } from "@/server/project-db";
 
 // ---------------------------------------------------------------------------
 // System prompts + per-app database notes for every phase of the agent
@@ -99,9 +98,14 @@ export const REVIEW_DB_NOTE = `
 
 Note: a \`.env.local\` containing DATABASE_URL (and, for apps with auth, BETTER_AUTH_SECRET / AUTH_SECRET / BETTER_AUTH_URL) in the working directory is expected platform infrastructure (the app's own Postgres database, auth signing secret, and public preview origin) — its presence is not a finding, and code using process.env.DATABASE_URL / process.env.BETTER_AUTH_SECRET / process.env.BETTER_AUTH_URL server-side is correct. Never print that file's contents.`;
 
-/** Appends `note` when the per-app database integration is active. */
+/**
+ * Appends the per-app database note. Unconditional: NEON_API_KEY is required
+ * (src/server/project-db.ts), so every session has a database. It stays a
+ * separate function rather than being folded into the prompt constants so the
+ * notes remain independently readable and testable.
+ */
 export function dbAware(prompt: string, note: string): string {
-  return isNeonConfigured() ? prompt + note : prompt;
+  return prompt + note;
 }
 
 // Mock loop (src/server/agent-mock.ts) status-line filler, shown between the

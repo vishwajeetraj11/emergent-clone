@@ -1,7 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { writeFileSync } from "node:fs";
 import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
-import path from "node:path";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { projects, sessions } from "@/db/schema";
@@ -22,9 +20,12 @@ import { projects, sessions } from "@/db/schema";
 // snapshots (src/server/files.ts) precisely so the secret never lands in the
 // `files` table, GitHub exports, forks' copied files, or Vercel deploys.
 //
-// Same isXConfigured() gating idiom as the GitHub App / Vercel integrations:
-// no NEON_API_KEY -> every helper here silently no-ops and the platform
-// behaves exactly as it did before this feature existed.
+// NEON_API_KEY is REQUIRED. Without a database, generated apps can't persist
+// anything or have accounts, and the agent has no way to be told so — every
+// instruction forbidding a fake localStorage login lives in the DB notes that
+// only get appended when this is configured (src/server/agent-prompts.ts). An
+// unconfigured environment would quietly produce apps with pretend auth, so it
+// throws instead.
 // ---------------------------------------------------------------------------
 
 const NEON_API_BASE = "https://console.neon.tech/api/v2";
@@ -40,8 +41,25 @@ setDefaultAutoSelectFamilyAttemptTimeout(1500);
 /** Default region for new Neon projects — override via NEON_REGION. */
 const DEFAULT_REGION = "aws-ap-southeast-1";
 
-export function isNeonConfigured(): boolean {
-  return Boolean(process.env.NEON_API_KEY);
+/**
+ * Thrown when NEON_API_KEY is missing. Distinct from a provisioning failure:
+ * this one is a deployment mistake that must surface, whereas a Neon API
+ * hiccup is transient and must not take the sandbox down with it — see the
+ * onCreate handler in src/server/sandbox-vercel.ts, which rethrows this and
+ * swallows everything else.
+ */
+export class NeonNotConfiguredError extends Error {
+  constructor() {
+    super(
+      "NEON_API_KEY is not set. Per-app databases are required — generated " +
+        "apps need one for persistence and accounts. See docs/setup.md."
+    );
+    this.name = "NeonNotConfiguredError";
+  }
+}
+
+function assertNeonConfigured(): void {
+  if (!process.env.NEON_API_KEY) throw new NeonNotConfiguredError();
 }
 
 async function neonFetch<T>(
@@ -113,10 +131,11 @@ interface NeonCreatedBranch {
  *  - project exists but this session has no branch (e.g. a fork, or a second
  *    session) -> new branch, parented on the parent session's branch when the
  *    fork lineage is known so the fork starts with a copy of the parent's data.
- * Returns the session's DATABASE_URL, or null when Neon isn't configured.
+ * Returns the session's DATABASE_URL, or null when the session has vanished.
+ * Throws NeonNotConfiguredError when NEON_API_KEY is unset.
  */
 export async function ensureSessionDatabase(sessionId: string): Promise<string | null> {
-  if (!isNeonConfigured()) return null;
+  assertNeonConfigured();
 
   const db = getDb();
   const [session] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
@@ -198,11 +217,11 @@ export async function ensureSessionDatabase(sessionId: string): Promise<string |
  * base64url-encoded (URL/header-safe, ≥43 chars). It reaches the generated app
  * as BETTER_AUTH_SECRET in `.env.local` (buildSandboxEnvContent below) and must
  * stay STABLE across resumes — better-auth signs session cookies with it, so a
- * rotation would silently log everyone out. Returns the session's secret, or
- * null when Neon isn't configured.
+ * rotation would silently log everyone out. Returns null when the session has
+ * vanished.
  */
 export async function ensureSessionAuthSecret(sessionId: string): Promise<string | null> {
-  if (!isNeonConfigured()) return null;
+  assertNeonConfigured();
 
   const db = getDb();
   const [session] = await db
@@ -261,29 +280,9 @@ export async function buildSandboxEnvContent(
 }
 
 /**
- * Writes the session's `.env.local` (DATABASE_URL + auth secret, see
- * buildSandboxEnvContent) into `<dir>` so the generated app's `next dev` picks
- * it up natively. No-op (and no file written) when Neon isn't configured or
- * provisioning fails — a database problem must never block a sandbox from
- * starting, since most generated apps don't use one at all. Errors are logged,
- * not thrown.
- */
-export async function writeSandboxEnvFile(sessionId: string, dir: string): Promise<void> {
-  if (!isNeonConfigured()) return;
-  try {
-    const content = await buildSandboxEnvContent(sessionId);
-    if (!content) return;
-    writeFileSync(path.join(dir, ".env.local"), content, "utf8");
-  } catch (err) {
-    console.error(`[project-db] provisioning database for session ${sessionId} failed`, err);
-  }
-}
-
-/**
  * Deletes the project's entire Neon project (all session branches with it).
- * Best-effort — called when an emergent project is deleted, if ever wired.
+ * Best-effort — called when an emergent project is deleted.
  */
 export async function dropProjectDatabase(neonProjectId: string): Promise<void> {
-  if (!isNeonConfigured()) return;
   await neonFetch("DELETE", `/projects/${neonProjectId}`);
 }

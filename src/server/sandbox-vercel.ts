@@ -1,6 +1,6 @@
 import { Sandbox } from "@vercel/sandbox";
 import { getSessionFiles } from "@/server/files";
-import { buildSandboxEnvContent } from "@/server/project-db";
+import { buildSandboxEnvContent, NeonNotConfiguredError } from "@/server/project-db";
 import {
   type SandboxProvider,
   type SandboxStartOptions,
@@ -325,6 +325,10 @@ export class VercelSandboxProvider implements SandboxProvider {
               ];
             }
           } catch (err) {
+            // A missing NEON_API_KEY is a deployment mistake, not a transient
+            // failure — let it kill the boot rather than quietly handing back a
+            // sandbox whose app can never persist anything.
+            if (err instanceof NeonNotConfiguredError) throw err;
             console.error(
               `[sandbox-vercel] database provisioning for session ${sessionId} failed`,
               err

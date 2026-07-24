@@ -78,6 +78,36 @@ where absence removed a restriction rather than a feature.
 Get both from a Clerk dashboard instance. Local dev needs its own (a
 development instance's `pk_test_`/`sk_test_` pair is free).
 
+## Neon per-app databases — `NEON_API_KEY`, `NEON_REGION`, `NEON_ORG_ID`
+
+**Required.** Per-app Postgres for generated apps (`src/server/project-db.ts`).
+
+One Neon project per emergent project (created lazily on first sandbox start),
+one Neon **branch** per session — so a fork's database is a copy-on-write
+snapshot of its parent, matching the fork's copied files. The session's
+connection string and auth secret are written into its sandbox as `.env.local`,
+which is deliberately excluded from file snapshots and GitHub export.
+
+It is required rather than optional because of how the agent learns a database
+exists at all. Every instruction telling it to build real persistence — and the
+one forbidding a fake localStorage login — lives in the DB notes that `dbAware()`
+appends (`src/server/agent-prompts.ts`). With no key, the planner still offers
+auth as a scoping topic (it is listed unconditionally in the first-turn
+questions) but the builder gets no guidance, so it would produce a login screen
+that looks real and persists nothing. Missing config now throws
+`NeonNotConfiguredError` at sandbox start instead.
+
+A transient Neon API failure is treated differently: it is logged and the
+sandbox still boots, since a provisioning hiccup shouldn't cost the user their
+preview. Only the config error is fatal.
+
+Create a key under Neon console → Account settings → API keys.
+
+- `NEON_REGION` — optional, region for new projects. Defaults to
+  `aws-ap-southeast-1`.
+- `NEON_ORG_ID` — optional, only when the key spans several orgs; otherwise the
+  key's sole org is used.
+
 ---
 
 ## GitHub "Save" — `GITHUB_APP_*`
@@ -138,20 +168,3 @@ is needed.
 `STRIPE_WEBHOOK_SECRET` is required by `POST /api/webhooks/stripe` to verify
 delivery signatures. Without it, purchases can never grant credits even with
 `STRIPE_SECRET_KEY` set.
-
-## Neon per-app databases — `NEON_API_KEY`, `NEON_REGION`, `NEON_ORG_ID`
-
-Per-app Postgres for generated apps (`src/server/project-db.ts`). Unset,
-generated apps simply get no database and everything else is unchanged.
-
-With a key set: one Neon project per emergent project (created lazily on first
-sandbox start), one Neon **branch** per session — so a fork's database is a
-copy-on-write snapshot of its parent, matching the fork's copied files. The
-session's connection string is written into its sandbox as `.env.local`, which
-is deliberately excluded from file snapshots and GitHub export.
-
-Create a key under Neon console → Account settings → API keys.
-
-- `NEON_REGION` — region for new projects. Defaults to `aws-ap-southeast-1`.
-- `NEON_ORG_ID` — only needed when the key spans several orgs; otherwise the
-  key's sole org is used (`src/server/project-db.ts:82`).
