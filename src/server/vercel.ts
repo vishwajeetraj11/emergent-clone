@@ -69,37 +69,64 @@ async function disableDeploymentProtection(projectName: string): Promise<void> {
 }
 
 /**
- * Makes the session's own Postgres DATABASE_URL (sessions.databaseUrl —
- * see src/server/project-db.ts) available to the deployed app. The `files`
+ * Makes the session's `.env.local` available to the deployed app. The `files`
  * snapshot a deploy is built from deliberately excludes `.env.local`
  * (src/server/files.ts), so without this a DB-backed app deploys fine and
- * then dies on its first query. Two steps, both required BEFORE the
- * deployment is created (env vars are baked into a deployment's build and
- * runtime at creation time, and only an existing project can hold env vars
- * — today the project is otherwise only auto-created BY the first deploy,
- * too late for that deploy's own build):
+ * then dies on its first query.
+ *
+ * This must mirror buildSandboxEnvContent (src/server/project-db.ts) — the
+ * deployed app is the SAME app as the sandbox one and needs the same
+ * environment. It previously set DATABASE_URL alone, which left every
+ * generated app's signup broken once deployed: better-auth had no signing
+ * secret, and no BETTER_AUTH_URL, so it rejected its own origin (the same
+ * failure the sandbox hit before BETTER_AUTH_URL was passed there).
+ *
+ * BETTER_AUTH_URL is the project's stable production alias rather than the
+ * per-deployment URL the API returns, which changes on every deploy and isn't
+ * known until after the deployment exists — too late, since env vars are baked
+ * in at creation time.
+ *
+ * The auth secret is the session's own (sessions.authSecret), so accounts
+ * created in the preview keep working on the deployed app: same database, same
+ * signing key.
+ *
+ * Two steps, both required BEFORE the deployment is created (env vars are
+ * baked into a deployment's build and runtime at creation time, and only an
+ * existing project can hold env vars — today the project is otherwise only
+ * auto-created BY the first deploy, too late for that deploy's own build):
  *
  *   1. POST /v11/projects — create the project if it doesn't exist yet. An
  *      "already exists" conflict is the normal steady-state and treated as
  *      success.
- *   2. POST /v10/projects/{name}/env?upsert=true — upsert DATABASE_URL.
+ *   2. POST /v10/projects/{name}/env?upsert=true — upsert each var.
  *      `type: "encrypted"` (not "sensitive") so the user can still read
- *      their own connection string in the Vercel dashboard; upsert keeps it
+ *      their own values in the Vercel dashboard; upsert keeps them
  *      current on every redeploy.
  *
  * Best-effort and non-fatal, same contract as disableDeploymentProtection
  * below: a failure here logs and falls through to a plain deploy — an app
- * deployed without its env var is no worse than the pre-feature behavior,
+ * deployed without its env vars is no worse than the pre-feature behavior,
  * and strictly better than failing the deploy the user is waiting on.
  */
-async function ensureProjectDatabaseEnv(
+async function ensureProjectEnv(
   projectName: string,
-  databaseUrl: string
+  databaseUrl: string,
+  authSecret: string | null
 ): Promise<void> {
   const headers = {
     Authorization: `Bearer ${process.env.VERCEL_TOKEN}`,
     "Content-Type": "application/json",
   };
+
+  // Mirrors buildSandboxEnvContent: the secret goes under BOTH names because
+  // better-auth reads BETTER_AUTH_SECRET while some generated code reaches for
+  // the more generic AUTH_SECRET.
+  const vars: Record<string, string> = { DATABASE_URL: databaseUrl };
+  if (authSecret) {
+    vars.BETTER_AUTH_SECRET = authSecret;
+    vars.AUTH_SECRET = authSecret;
+  }
+  vars.BETTER_AUTH_URL = `https://${projectName}.vercel.app`;
 
   try {
     const createRes = await fetch(vercelApiUrl("/v11/projects"), {
@@ -124,30 +151,32 @@ async function ensureProjectDatabaseEnv(
     }
 
     const envBase = vercelApiUrl(`/v10/projects/${projectName}/env`);
-    const envRes = await fetch(
-      `${envBase}${envBase.includes("?") ? "&" : "?"}upsert=true`,
-      {
+    const envUrl = `${envBase}${envBase.includes("?") ? "&" : "?"}upsert=true`;
+    // Sequential rather than Promise.all: these are upserts against the same
+    // project, and a partial failure should still leave the others applied.
+    for (const [key, value] of Object.entries(vars)) {
+      const envRes = await fetch(envUrl, {
         method: "POST",
         headers,
         body: JSON.stringify({
-          key: "DATABASE_URL",
-          value: databaseUrl,
+          key,
+          value,
           type: "encrypted",
           target: ["production", "preview", "development"],
         }),
+      });
+      if (!envRes.ok) {
+        const body = await envRes.json().catch(() => ({}));
+        const message =
+          (body as { error?: { message?: string } })?.error?.message ??
+          `status ${envRes.status}`;
+        console.error(
+          `[vercel] failed to upsert ${key} env var on ${projectName}: ${message}`
+        );
       }
-    );
-    if (!envRes.ok) {
-      const body = await envRes.json().catch(() => ({}));
-      const message =
-        (body as { error?: { message?: string } })?.error?.message ??
-        `status ${envRes.status}`;
-      console.error(
-        `[vercel] failed to upsert DATABASE_URL env var on ${projectName}: ${message}`
-      );
     }
   } catch (err) {
-    console.error(`[vercel] failed to wire DATABASE_URL for ${projectName}`, err);
+    console.error(`[vercel] failed to wire env vars for ${projectName}`, err);
   }
 }
 
@@ -180,9 +209,10 @@ export async function deploySessionToVercel(sessionId: string): Promise<{ url: s
   const projectName = `emergent-clone-${sessionId.replace(/-/g, "").slice(0, 24)}`;
 
   // Must happen before the deployment is created — see this helper's doc
-  // comment. Skipped entirely for sessions without their own database.
+  // comment. Skipped entirely for sessions without their own database: no
+  // database means no DB-backed auth either, so there is nothing to wire.
   if (session.databaseUrl) {
-    await ensureProjectDatabaseEnv(projectName, session.databaseUrl);
+    await ensureProjectEnv(projectName, session.databaseUrl, session.authSecret);
   }
 
   const res = await fetch(vercelApiUrl("/v13/deployments"), {
