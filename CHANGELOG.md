@@ -2,6 +2,43 @@
 
 Notable changes to the Emergent clone. Newest first.
 
+## 2026-07-24 — Fix `killDevServer` killing its own shell instead of the dev server
+
+**Before.** The kill was written as:
+
+```sh
+sh -c "pkill -f next || true; pkill -f 'npm run dev' || true"
+```
+
+`pkill -f` matches against full command lines, and the `sh` process's own
+cmdline contains both patterns — so it matched itself and SIGTERMed itself.
+Confirmed in the Vercel activity log: the command exits **143**, and the second
+`pkill` never runs. `killDevServer` therefore never killed anything, while
+appearing to succeed (errors are swallowed by design).
+
+**Consequence.** Both call sites are restarts within a live VM — after
+`npm install` so Next re-resolves modules, and when a stale-env or half-dead
+server is holding the port. With the old server surviving, the replacement
+`npm run dev -- -p 3000` found the port taken and Next bumped it
+(`start-server.js`: "Port 3000 is in use ... using available port 3001
+instead"). The preview URL is `sandbox.domain(APP_PORT)`, so it kept serving
+the OLD server: stale code after an agent edit, or the dead credentials the
+restart existed to clear. The health probe passed too — something was
+answering on 3000 — so nothing surfaced the problem.
+
+**Now.** Bracket classes, which cannot match the shell's own cmdline:
+
+```sh
+sh -c "pkill -f '[n]ext' || true; pkill -f '[n]pm run' || true"
+```
+
+`[n]ext` still matches a process running `next dev`, but not this shell, whose
+cmdline holds the literal text `[n]ext`. The second pattern is widened from
+`npm run dev` to `npm run` so a production server is covered too.
+
+The call site carries a comment saying the brackets are load-bearing — it reads
+like a typo and would otherwise get "simplified" straight back into the bug.
+
 ## 2026-07-22 — Move the builder to `/dashboard`, make `/` the landing page for everyone
 
 **Before.** `/` meant two different things depending on who was looking:

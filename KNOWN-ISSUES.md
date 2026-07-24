@@ -116,38 +116,7 @@ keeping from that investigation:
 
 ---
 
-## 2. `killDevServer`'s `pkill` kills its own shell (open)
-
-`src/server/sandbox-vercel.ts`:
-
-```sh
-sh -c "pkill -f next || true; pkill -f 'npm run dev' || true"
-```
-
-The `sh` process's own command line contains both `next` and `npm run dev`, so
-`pkill -f` matches the shell itself and SIGTERMs it. Confirmed: the Vercel
-activity log shows this command exiting **143**, and the second `pkill` never
-runs.
-
-**Consequence.** When a dev server really is holding the port, it survives.
-The replacement `npm run dev` then finds port 3000 occupied and gets bumped to
-another port, so the sandbox URL keeps serving the *old* server — stale code
-after an agent edit, with nothing in the logs to explain it.
-
-**Fix.** Use a bracket class so the pattern cannot match the shell's own
-cmdline, and widen it to cover a production server too:
-
-```sh
-sh -c "pkill -f '[n]ext' || true; pkill -f '[n]pm run' || true"
-```
-
-`[n]ext` matches a target process running `next dev`, but not the shell, whose
-literal cmdline text is `[n]ext`. Worth a comment at the call site — it reads
-like a typo and will get "simplified" back into the bug otherwise.
-
----
-
-## 3. Residual races in the deferred preview stop (open, low severity)
+## 2. Residual races in the deferred preview stop (open, low severity)
 
 Follow-ups from the review of the 2026-07-22 deferred-stop change. Both are
 strictly better than the eager-stop behavior they replaced; neither blocks use.

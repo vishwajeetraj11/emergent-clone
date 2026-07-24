@@ -411,10 +411,23 @@ export class VercelSandboxProvider implements SandboxProvider {
     return this.startDevServerAndWait(sessionId, sandbox, url);
   }
 
-  /** Kills any dev server holding APP_PORT inside the VM. Best-effort. */
+  /**
+   * Kills any dev server holding APP_PORT inside the VM. Best-effort.
+   *
+   * The bracket classes are load-bearing, NOT a typo. `pkill -f` matches
+   * against full command lines, and this `sh` process's own cmdline contains
+   * whatever pattern it is given — so a plain `pkill -f next` matches the shell
+   * running it and SIGTERMs itself (exit 143), leaving the real dev server
+   * alive and the second pkill unreached. `[n]ext` still matches a process
+   * running `next dev`, but not this shell, whose cmdline holds the literal
+   * text `[n]ext`. Do not "simplify" the brackets away.
+   */
   private async killDevServer(sandbox: Sandbox): Promise<void> {
     await sandbox
-      .runCommand({ cmd: "sh", args: ["-c", "pkill -f next || true; pkill -f 'npm run dev' || true"] })
+      .runCommand({
+        cmd: "sh",
+        args: ["-c", "pkill -f '[n]ext' || true; pkill -f '[n]pm run' || true"],
+      })
       .catch(() => {});
   }
 
