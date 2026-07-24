@@ -1,6 +1,10 @@
 "use client";
 
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useCredits } from "@/lib/hooks/useCredits";
 import type { JobStatus } from "@/lib/types";
 
@@ -60,7 +64,7 @@ export function CreditsPill({ jobStatus }: { jobStatus?: JobStatus | null }) {
             <span className="sr-only">Loading credit balance</span>
             <span
               aria-hidden
-              className="inline-block h-3 w-[68px] animate-pulse rounded-full bg-yellow-950/20"
+              className="inline-block h-3 w-17 animate-pulse rounded-full bg-yellow-950/20"
             />
           </>
         ) : balance !== null ? (
