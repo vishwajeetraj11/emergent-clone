@@ -299,17 +299,45 @@ export function buildAskUserTool(deps: AskUserDeps) {
 // on this call via hasToolCall("report_review") in llm.ts's stopWhen).
 // ---------------------------------------------------------------------------
 
+export interface ReviewFinding {
+  description: string;
+  file?: string;
+  evidence?: string;
+}
+
 export interface ReviewResult {
   issuesFound: boolean;
   summary: string;
-  findings: string[];
+  findings: ReviewFinding[];
 }
 
-/** Raw shape for report_review's input — see askUserInputShape's comment above; same reasoning, same reuse. */
+/** Raw shape for report_review's input — see askUserInputShape's comment above; same reasoning, same reuse.
+ * Findings are structured rather than free strings: the debug pass runs in a
+ * fresh context, so whatever the reviewer saw (which file, what actually
+ * failed) must survive the handoff inside the finding itself or it's lost. */
 export const reportReviewInputShape = {
   issuesFound: z.boolean(),
   summary: z.string().min(1),
-  findings: z.array(z.string().min(1)).max(10).default([]),
+  findings: z
+    .array(
+      z.object({
+        description: z.string().min(1).describe("What is wrong, concretely"),
+        file: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Path of the file where the problem lives, relative to the working directory"),
+        evidence: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "What you observed that proves it: the failing output, the mismatched symbol, the curl response"
+          ),
+      })
+    )
+    .max(10)
+    .default([]),
 };
 
 export function buildReportReviewTool(resultRef: { value: ReviewResult | null }) {

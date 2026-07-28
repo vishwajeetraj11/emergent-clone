@@ -181,23 +181,32 @@ async function runDebugPhase(
   sandbox: Sandbox,
   review: ReviewResult,
   builderModel: string,
-  originalPrompt: string
+  originalPrompt: string,
+  planText: string
 ): Promise<void> {
   const findingsList =
     review.findings.length > 0
-      ? review.findings.map((finding, i) => `${i + 1}. ${finding}`).join("\n")
+      ? review.findings
+          .map((finding, i) => {
+            const location = finding.file ? ` [${finding.file}]` : "";
+            const evidence = finding.evidence ? `\n   Evidence: ${finding.evidence}` : "";
+            return `${i + 1}.${location} ${finding.description}${evidence}`;
+          })
+          .join("\n")
       : review.summary;
 
   // Same fresh-context problem as runReviewPhase above: a debugger that
   // only sees finding strings will happily "fix" its way past the user's
-  // intent. The original request anchors every fix to what the app is for.
+  // intent. The original request anchors every fix to what the app is for,
+  // and the plan marks which choices are deliberate — without it, a fix can
+  // quietly undo a decision the reviewer was told not to flag.
   const result = await runAgentQuery({
     modelId: builderModel,
     system: dbAware(DEBUG_SYSTEM_PROMPT, BUILD_DB_NOTE),
     prompt: `The app in this working directory was built for this request — keep every fix consistent with it:
 
 Current request: ${originalPrompt}
-
+${planText ? `\nApproved plan — its decisions are deliberate; fix the findings without undoing them:\n${planText}\n` : ""}
 Fix the following issues found in code review:
 
 ${findingsList}`,
@@ -247,7 +256,7 @@ async function runReviewAndDebugTail(
 
   if (!review.issuesFound) return;
 
-  await runDebugPhase(jobId, sandbox, review, builderModel, originalPrompt);
+  await runDebugPhase(jobId, sandbox, review, builderModel, originalPrompt, planText);
   if (await isStopped(jobId)) return;
 
   const changed = await snapshotSessionFiles(sessionId, sandbox);

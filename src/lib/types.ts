@@ -41,7 +41,9 @@ export type TimelineEventType =
   // { planEventId: string, action: "approve" | "revise", feedback?: string }.
   | "plan_decision"
   // Orchestration: structured output of the post-build review pass —
-  // payload: { issuesFound: boolean, summary: string, findings: string[] }.
+  // payload: { issuesFound: boolean, summary: string,
+  // findings: { description: string, file?: string, evidence?: string }[] }.
+  // (Rows written before findings were structured hold plain strings.)
   | "review";
 
 export interface Question {
