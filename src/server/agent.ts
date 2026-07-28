@@ -315,7 +315,7 @@ async function runSummaryQuery(jobId: string): Promise<void> {
 // off); Plan mode on uses CONTINUATION_PLANNING_SYSTEM_PROMPT instead.
 const CONTINUATION_PLAN_TEXT = `This is a continuation of an app that is already built and running in this working directory — it is NOT a fresh build, so do not scaffold from scratch or assume an empty project.
 
-First inspect the existing files (list the directory, then read whatever's relevant to the request) to understand the current implementation and its conventions, then make the requested change directly.
+First inspect the existing files to understand the current implementation and its conventions, then make the requested change directly. Your prompt usually includes a map of what's already on disk — read whatever's relevant to the request from that map, and only fall back to listing the directory yourself if no map is there.
 
 Only stop to ask a clarifying question if the request is genuinely ambiguous in a way that risks doing the wrong thing. For a straightforward iterative request, make a reasonable choice consistent with the existing app and note what you chose in your closing summary — don't block on a multiple-choice questionnaire for a small change.`;
 
