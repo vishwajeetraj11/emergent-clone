@@ -276,6 +276,14 @@ export async function buildSandboxEnvContent(
   if (appUrl) {
     lines.push(`BETTER_AUTH_URL=${appUrl}`);
   }
+  // Marks "this process is serving the preview inside a cross-origin iframe",
+  // which is the ONLY reason a generated app's session cookie needs
+  // SameSite=None (see BUILD_DB_NOTE in src/server/agent-prompts.ts). This file
+  // is sandbox-only — EXCLUDED_FILES in src/server/files.ts keeps it out of every
+  // snapshot, so it never reaches GitHub or a Vercel deployment. That absence is
+  // the point: deployed apps are served top-level, don't need the relaxation, and
+  // fall back to SameSite=Lax and its CSRF protection without any extra plumbing.
+  lines.push("EMERGENT_PREVIEW_IFRAME=1");
   return lines.join("\n") + "\n";
 }
 
