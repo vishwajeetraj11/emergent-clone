@@ -11,6 +11,8 @@ endorsed by, or connected to Emergent, and does not attempt to match its scope.
 
 Not deployed anywhere. Nothing here is mocked.
 
+Walkthrough: [Emergent Clone pt-1](https://www.youtube.com/watch?v=OVXjhwnDz-k).
+
 ## How a build runs
 
 Four passes, each a separate model call with its own context:
