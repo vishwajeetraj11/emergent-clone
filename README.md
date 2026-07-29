@@ -11,7 +11,8 @@ endorsed by, or connected to Emergent, and does not attempt to match its scope.
 
 Not deployed anywhere. Nothing here is mocked.
 
-Walkthrough: [Emergent Clone pt-1](https://www.youtube.com/watch?v=OVXjhwnDz-k).
+Walkthroughs: [pt-1](https://www.youtube.com/watch?v=OVXjhwnDz-k), and
+[pt-2: debugging a login bug in a generated app](https://youtu.be/NauO8abC4I0).
 
 ## How a build runs
 
